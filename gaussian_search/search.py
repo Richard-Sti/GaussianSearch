@@ -1,0 +1,419 @@
+# Copyright (C) 2021  Richard Stiskalek
+# This program is free software; you can redistribute it and/or modify it
+# under the terms of the GNU General Public License as published by the
+# Free Software Foundation; either version 3 of the License, or (at your
+# option) any later version.
+#
+# This program is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General
+# Public License for more details.
+#
+# You should have received a copy of the GNU General Public License along
+# with this program; if not, write to the Free Software Foundation, Inc.,
+# 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+
+import numpy
+
+import os
+from copy import deepcopy
+
+from sklearn.gaussian_process import (GaussianProcessRegressor, kernels)
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+from sklearn.model_selection import GridSearchCV
+from sklearn.exceptions import ConvergenceWarning
+import warnings
+
+from dynesty import NestedSampler
+from dynesty import utils as dyfunc
+
+from joblib import Parallel, delayed, dump, load
+
+from scipy.stats import uniform
+
+
+class GaussianProcessSearch:
+    """
+    TO DO:
+        - Make possible to restart from a state (TEST)
+
+        - joblib parallel dumping may reduce the overhead, check this out
+
+        - determine KL divergence between current and last posterior whether
+        any more information is being gained
+
+        - When exiting also save samples, evidence, the last checkpoint and also
+        make a getdist corner plot
+
+        - correct switching between grid and a single model (TEST)
+
+        - add setters for inputs
+
+    """
+
+
+    def __init__(self, run_name, params, model, bounds, nthreads=1,
+                 gp=None, hyper_grid=None, random_state=None):
+        self._bounds = None
+        self._pdist = None
+        self._X = None
+        self._y = None
+        self._surrogate_model = None
+
+        self._prior_min = None
+        self._prior_width = None
+
+        if isinstance(random_state, numpy.random.RandomState):
+            self.generator = random_state
+        else:
+            self.generator = numpy.random.RandomState(random_state)
+
+        # Will have to add setters for these
+        self.model = model
+        self.params = params
+        self.bounds = bounds
+        self.nthreads = nthreads
+        self.run_name = run_name
+        # Check if the temporary results folder exists
+        if not os.path.exists('./temp/'):
+            os.mkdir('./temp/')
+        # Warn if the checkpoint file exists
+        self._checkpoint_path = './temp/checkpoint_{}.z'.format(self.run_name)
+        if os.path.isfile(self._checkpoint_path):
+            warnings.warn("Temporal checkpoint at {} exists, will be "
+                          "overwritten.".format(self._checkpoint_path),
+                          UserWarning)
+        # Get the Gaussian process regressor/grid search
+        self.surrogate_model, self._is_grid = self._init_gp(
+                gp, hyper_grid, nthreads, self.generator)
+        # print('Randoms: ', self._pdist.rvs(size=2))
+        # State will be used to restart the grid search
+        self._state = {'params': self.params,
+                       'run_name': self.run_name,
+                       'model': self.model,
+                       'nthreads': self.nthreads,
+                       'bounds': self.bounds,
+                       'gp': gp,
+                       'hyper_grid': hyper_grid}
+
+    @staticmethod
+    def _init_gp(gp, hyper_grid, nthreads, generator):
+        # Set up the Gaussian process, pipeline and grid search
+        if gp is not None and type(gp) is not GaussianProcessRegressor:
+            raise ValueError("`gp` must be of {} type."
+                             .format(type(GaussianProcessRegressor())))
+
+        if gp is None:
+            gp = GaussianProcessRegressor(kernels.Matern(nu=2.5),
+                    alpha=1e-6, normalize_y=True, n_restarts_optimizer=5,
+                    random_state=generator)
+
+        pipe = Pipeline([('scaler', StandardScaler()),
+                         ('gp', gp)])
+
+        if hyper_grid is not None:
+            is_grid = True
+            surrogate_model = GridSearchCV(pipe, hyper_grid, n_jobs=nthreads)
+        else:
+            surrogate_model = pipe
+            is_grid = False
+        return surrogate_model, is_grid
+
+    @property
+    def bounds(self):
+        """
+        The prior boundaries.
+
+        Returns
+        -------
+        bounds : dict
+            Prior boundaries {`parameter`: (min, max)}
+        """
+        return self._bounds
+
+    @bounds.setter
+    def bounds(self, bounds):
+        """Sets `bounds` and stores the uniform distributions."""
+        if not isinstance(bounds, dict):
+            raise ValueError("`bounds` must be a dict.")
+        # Check each parameter has a boundary
+        for par in self.params:
+            if not par in bounds.keys():
+                raise ValueError("Parameter '{}' is missing a boundary."
+                                 .format(par))
+        # Check each entry is a len-2 tuple
+        for par, bound in bounds.items():
+            if not isinstance(bound, (list, tuple)) or len(bounds) != 2:
+                raise ValueError("Parameter's '{}' boundary '{}' must be a "
+                                 "len-2 tuple.".format(par, bound))
+            # Ensure correct ordering
+            if bound[0] > bound[1]:
+                bounds.update({par: bound[::-1]})
+
+        self._bounds = bounds
+        # Prior uniform distribution for the target
+        self._prior_min = numpy.array([bnd[0] for bnd in self.bounds.values()])
+        self._prior_max = numpy.array([bnd[1] for bnd in self.bounds.values()])
+        self._pdist = uniform(loc=self._prior_min, scale=self._prior_max - self._prior_min)
+
+
+    def run_points(self, X, to_save=False):
+        """
+        Samples points specified by `X`, runs in parallel. After points are
+        sampled retrains the Gaussian process.
+
+        TO DO:
+            - likelihood kwargs
+
+        Parameters
+        ----------
+        X : numpy.ndarray (npoints, nfeatures)
+            Array of points to be sampled.
+        nthreads : int
+            Number of jobs to be run in parallel.
+        """
+        # Unpack X into a list of dicts
+        points = [{attr: X[i, j] for j, attr in enumerate(self.params)}
+                  for i in range(X.shape[0])]
+        # Process the points in parallel
+        with Parallel(n_jobs=self.nthreads) as par:
+            targets = par(delayed(self.model)(**point) for point in points)
+        # Append the results
+        if self._X is None:
+            self._X = X
+            self._y = numpy.array(targets)
+        else:
+            self._X = numpy.vstack([self._X, X])
+            self._y = numpy.hstack([self._y, targets])
+        self._refit_gp()
+        self.save_checkpoint()
+        if to_save:
+            self.save_grid()
+
+    def _refit_gp(self):
+        """
+        Refits the Gaussian process with internally stored points `self._X`
+        and `self._y`
+        """
+        # Silence convergence warning of the GaussianRegressor's optimiser
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', category=ConvergenceWarning)
+            self.surrogate_model.fit(self._X, self._y)
+
+    def run_batches(self, Ninit=0, Nmcmc=0, batch_size=5, to_save=True):
+        """
+        Samples `Ninit` and `Nmcmc` in batches of size `batch_size`.
+
+        Parameters
+        ----------
+        Ninit : int, optional
+            Number of initially uniformly sampled batches. By default 0.
+        Nmcmc : int, optional
+            Number of batches from the acquisition function. By default 0.
+        batch_size : int, optional
+            Batch size, determines how many points are sampled without
+            without updating the surrogate Gaussian Process. Typically
+            are evaluated in parallel.
+        """
+        if Ninit == 0 and Nmcmc == 0:
+            warnings.warn("Both `Ninit` and `Nmcmc` are 0, exiting.",
+                           UserWarning)
+        # Initial batches sampled from the prior
+        for i in range(Ninit):
+            X = self._uniform_samples(batch_size)
+            self.run_points(X)
+        # Batches sampled from the acquisition function
+        for i in range(Nmcmc):
+            X = self._acquisition_samples(kappa=2.5, Nsamples=batch_size)
+            self.run_points(X)
+
+        if to_save:
+            self.save_grid()
+
+    def surrogate_predict(self, X, kappa=0):
+        ndim = X.ndim
+        if ndim == 1:
+            X = X.reshape(1, -1)
+
+        if kappa != 0:
+            # GaussianRegressor raises warning when std=0. Silence it
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore', category=UserWarning)
+                if self._is_grid:
+                    mu, std = self.surrogate_model.best_estimator_.predict(X, return_std=True)
+                else:
+                    mu, std = self.surrogate_model.predict(X, return_std=True)
+            ypred = mu + kappa * std
+        else:
+            ypred = self.surrogate_model.predict(X)
+
+        if ndim == 1:
+            return ypred[0]
+        return ypred
+
+    def _prior_transform(self, u):
+        """
+        Inverse uniform cdf over the prior range for the nested sampler.
+
+        Parameters
+        ----------
+        u : numpy.ndarray
+            Array of random numbers.
+
+        Returns
+        -------
+        sampled_points : numpy.ndarray
+            Array of points sampled from the prior.
+        """
+        return self._pdist.ppf(u)
+
+    def surrogate_posterior_samples(self):
+        samples, target, logz = self._samples(kappa=0, return_full=True)
+        X = numpy.hstack([samples, target.reshape(-1, 1)])
+        X = numpy.core.records.fromarrays(X.T, names=self.params + ['target'])
+        return X, logz
+
+    def _acquisition_samples(self, kappa, Nsamples):
+        return self._samples(kappa=kappa, Nsamples=Nsamples)
+
+    def _samples(self, kappa, Nsamples=None, return_full=False):
+        sampler = NestedSampler(
+                self.surrogate_predict, self._prior_transform,
+                ndim=len(self.params), logl_kwargs={'kappa': kappa}, rstate=self.generator)
+        sampler.run_nested()
+        results = sampler.results
+
+        logz = results.logz[-1]
+
+        weights = numpy.exp(results.logwt - logz)
+        samples = dyfunc.resample_equal(results.samples, weights)
+
+        if Nsamples is not None:
+            m = self.generator.choice(samples.shape[0], Nsamples, replace=False)
+        else:
+            m = numpy.ones(samples.shape[0], dtype=bool)
+
+        if return_full:
+            logl = dyfunc.resample_equal(results.logl, weights)
+            return samples[m, :], logl[m], logz
+
+        return samples[m, :]
+
+    def _uniform_samples(self, N):
+        """
+        Samples `N` points from a uniform distribution within the boundaries.
+
+        Parameters
+        ----------
+        N : int
+            Number of points.
+
+        Returns
+        -------
+        points : numpy.ndarray (N, 2)
+            Randomly sampled points.
+        """
+        return self.generator.uniform(low=self._prior_min, high=self._prior_max, size=(N, 2))
+
+    @property
+    def positions(self):
+        """
+        Positions stepped by the grid search.
+
+        Returns
+        -------
+        positions : numpy.recarray
+            Structured array with sampled positions.
+        """
+        return numpy.core.records.fromarrays(numpy.copy(self._X).T,
+                                             names=self.params)
+
+    @property
+    def stats(self):
+        """
+        Target at the stepped positions.
+
+        Returns
+        -------
+        target : numpy.ndarray
+            Target values.
+        """
+        return numpy.copy(self._y)
+
+    @property
+    def current_state(self):
+        """
+        Current state of the grid search.
+
+        Returns
+        -------
+        checkpoint : dict
+            Current state of the grid search
+        """
+        self._state.update({'X': self._X,
+                            'y': self._y,
+                            'random_state': deepcopy(self.generator)})
+        return self._state
+
+    def save_checkpoint(self):
+        """
+        DOCS
+
+        """
+        checkpoint = self.current_state
+        print("Checkpoint saved at {}".format(self._checkpoint_path))
+        dump(checkpoint, self._checkpoint_path)
+
+    def save_grid(self):
+        print("Generating the final samples from the surrogate model.")
+        samples, logz = self.surrogate_posterior_samples()
+
+        # Create output folder too?
+        fpath = './out/{}/'.format(self.run_name)
+        if not os.path.exists(fpath):
+            os.makedirs(fpath)
+        # Save the evidence
+        with open(fpath + 'logz.txt', 'w') as f:
+            f.write(str(logz))
+
+        checkpoint = self.current_state
+        # Save the checkpoint
+        dump(checkpoint, fpath + 'checkpoint.z')
+        # Save the samples
+        numpy.save(fpath + 'surrogate_samples.npy', samples)
+        # Remove the temporary checkpoint
+        os.remove(self._checkpoint_path)
+
+    @classmethod
+    def from_checkpoint(cls, checkpoint, Xnew=None):
+        """
+        Loads the grid search from a checkpoint. May manually assign points
+        to sample.
+
+        Parameters
+        ----------
+        checkpoint : dict
+            Checkpoint returned from `self.current_state`.
+        Xnew : numpy.ndarray, optional
+            Optional points to be manually sampled.
+
+        Returns
+        -------
+        grid : BayesianGridSearch object
+            Grid search object initialised from the checkpoint.
+        """
+        X = checkpoint.pop('X', None)
+        y = checkpoint.pop('y', None)
+        grid = cls(**checkpoint)
+        grid._X = X
+        grid._y = y
+        # Refit the GP
+        print("Refitting the Gaussian process surrogate model.")
+        generator0 = deepcopy(grid.generator)
+        grid._refit_gp()
+        grid.generator = generator0
+        # If any new points sample those right now
+        if Xnew is not None:
+            grid.run_points(Xnew)
+        return grid
