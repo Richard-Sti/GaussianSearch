@@ -317,15 +317,15 @@ class GaussianProcessSearch:
         Samples points specified by `X`, runs in parallel. After points are
         sampled retrains the Gaussian process.
 
-        TO DO:
-            - likelihood kwargs
-
         Parameters
         ----------
         X : numpy.ndarray (npoints, nfeatures)
             Array of points to be sampled.
         nthreads : int
             Number of jobs to be run in parallel.
+        kwargs : dict
+            Keyword arguments passed into `self.model` that are not the sampled
+            positions.
         """
         if kwargs is None:
             kwargs = {}
@@ -388,7 +388,10 @@ class GaussianProcessSearch:
     def run_batches(self, Ninit=0, Nmcmc=0, batch_size=5, to_save=True,
                     kwargs=None):
         """
-        Samples `Ninit` and `Nmcmc` in batches of size `batch_size`.
+        Samples `Ninit` and `Nmcmc` in batches of size `batch_size`. If any
+        `kwargs` are passed, these will be memory-mapped to the disk for faster
+        parallel computation.
+
 
         Parameters
         ----------
@@ -400,7 +403,21 @@ class GaussianProcessSearch:
             Batch size, determines how many points are sampled without
             without updating the surrogate Gaussian Process. Typically
             are evaluated in parallel.
+        kwargs : dict
+            Keyword arguments passed into `self.model` that are not the sampled
+            positions.
         """
+        memmap_path = None
+        # If any kwargs passed in create a memory mapping
+        if kwargs is not None:
+            memmap_path = "./temp/memmap_{}".format(self.name)
+            if os.path.isfile(memmap_path):
+                warnings.warn("Temporal memory map at {} exists, will be "
+                              "overwritten.".format(memmap_path), UserWarning)
+
+            joblib.dump(kwargs, memmap_path)
+            kwargs = joblib.load(memmap_path, mmap_mode='r')
+
         if Ninit == 0 and Nmcmc == 0:
             warnings.warn("Both `Ninit` and `Nmcmc` are 0, exiting.",
                            UserWarning)
@@ -412,6 +429,9 @@ class GaussianProcessSearch:
         for __ in range(Nmcmc):
             X = self._acquisition_samples(Nsamples=batch_size)
             self.run_points(X, kwargs=kwargs)
+        # Clean up the memory mapping
+        if memmap_path is not None:
+            os.remove(memmap_path)
 
         if to_save:
             self.save_grid()
