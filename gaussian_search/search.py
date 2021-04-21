@@ -17,6 +17,7 @@
 
 import os
 import warnings
+from datetime import datetime
 from copy import deepcopy
 
 import numpy
@@ -43,10 +44,9 @@ class GaussianProcessSearch:
         - determine KL divergence between current and last posterior whether
         any more information is being gained
 
-        - When exiting also save samples, evidence, the last checkpoint and also
-        make a getdist corner plot
-
         - correct switching between grid and a single model (TEST)
+
+        - Refitting the GP becomes more and more expensive - increase batchsize
     """
 
 
@@ -326,6 +326,10 @@ class GaussianProcessSearch:
         points = [{attr: X[i, j] for j, attr in enumerate(self.params)}
                   for i in range(X.shape[0])]
         # Process the points in parallel
+        if self.verbose:
+            print("{}: evaluating {} samples."
+                  .format(datetime.now(), len(points)))
+
         with joblib.Parallel(n_jobs=self.nthreads) as par:
             targets = par(joblib.delayed(self.model)(**point)
                           for point in points)
@@ -336,6 +340,8 @@ class GaussianProcessSearch:
         else:
             self._X = numpy.vstack([self._X, X])
             self._y = numpy.hstack([self._y, targets])
+        if self.verbose:
+            print("{}: refitting the Gaussian process.".format(datetime.now()))
         self._refit_gp()
         self.save_checkpoint()
 
@@ -382,11 +388,8 @@ class GaussianProcessSearch:
         if to_save:
             self.save_grid()
 
-    def surrogate_predict(self, X, kappa=0, undo_prior=False):
+    def surrogate_predict(self, X, kappa=0):
         r"""
-        TO DO:
-            - DOCS!
-
         Evaluates the surrogate model at positions `X`, such that
 
             .. math::
@@ -460,6 +463,9 @@ class GaussianProcessSearch:
         logz : int
             Log evidence as returned by the nested sampler.
         """
+        if self.verbose:
+            print("{}: sampling the surrogate model."
+                  .format(datetime.now()))
         samples, target, logz = self._samples(kappa=0, return_full=True)
         X = numpy.hstack([samples, target.reshape(-1, 1)])
         X = numpy.core.records.fromarrays(X.T, names=self.params + ['target'])
@@ -480,6 +486,10 @@ class GaussianProcessSearch:
         X : np.ndarray
             Samples drawn from the acquisition function.
         """
+        if self.verbose:
+            print("{}: sampling the acquisition function."
+                  .format(datetime.now()))
+
         X = self._samples(kappa=self.kappa)
         if Nsamples > X.shape[0]:
             raise ValueError("Cannot ask for more samples `Nsamples = {}` than "
@@ -608,8 +618,6 @@ class GaussianProcessSearch:
         Saves the grid results upon termination (grid checkpoint, surrogate
         model samples and surrogate model evidence).
         """
-        if self.verbose:
-            print("Generating the final samples from the surrogate model.")
         samples, logz = self.surrogate_posterior_samples()
         # Optionally create the output folder
         fpath = './out/{}/'.format(self.name)
@@ -624,7 +632,7 @@ class GaussianProcessSearch:
         # Save the samples
         numpy.save(fpath + 'surrogate_samples.npy', samples)
         if self.verbose:
-            print("Outputs saved at {}.".format(fpath))
+            print("Output saved at {}.".format(fpath))
         # Remove the temporary checkpoint
         os.remove(self._checkpoint_path)
 
