@@ -50,33 +50,34 @@ class GaussianProcessSearch:
     """
 
 
-    def __init__(self, name, params, model, bounds, nthreads=1,
+    def __init__(self, name, params, model, bounds, nthreads=1, kappa=2.5,
                  gp=None, hyper_grid=None, random_state=None, verbose=True):
         self._name = None
         self._params = None
-        self._model = None
+        self._model = model
         self._bounds = None
         self._nthreads = None
+        self._kappa = None
         self._pdist = None
         self._verbose = None
         self._X = None
         self._y = None
         self._surrogate_model = None
-
         self._prior_min = None
         self._prior_width = None
 
-        self.name = name
-        self.params = params
-        self.model = model
-        self.bounds = bounds
-        self.nthreads = nthreads
-        self._initialise_gp(gp, hyper_grid)
         # Set the random state
         if isinstance(random_state, numpy.random.RandomState):
             self.generator = random_state
         else:
             self.generator = numpy.random.RandomState(random_state)
+
+        self.name = name
+        self.params = params
+        self.bounds = bounds
+        self.nthreads = nthreads
+        self.kappa = kappa
+        self._initialise_gp(gp, hyper_grid)
         self.verbose = verbose
         # Check if the temporary results folder exists
         if not os.path.exists('./temp/'):
@@ -218,6 +219,27 @@ class GaussianProcessSearch:
                 raise TypeError("`nthreads` must be of int type.")
             self._nthreads = nthreads
 
+    @property
+    def kappa(self):
+        """
+        Acquisition function parameter, controls the contribution of the
+        Gaussian process's standard deviation. See class documentation for
+        more details.
+
+        Returns
+        -------
+        kappa : float
+            Acquisition function parameter.
+        """
+        return self._kappa
+
+    @kappa.setter
+    def kappa(self, kappa):
+        """Sets `kappa`. Ensures it is a scalar."""
+        if not isinstance(kappa, (int, float)):
+            raise TypeError("`kappa` must be a positive scalar.")
+        self._kappa = kappa
+
     def _initialise_gp(self, gp, hyper_grid):
         """
         Initialises the Gaussian process surrogate model. If `gp` is `None`
@@ -328,7 +350,7 @@ class GaussianProcessSearch:
         # Silence convergence warning of the GaussianRegressor's optimiser
         with warnings.catch_warnings():
             warnings.simplefilter('ignore', category=ConvergenceWarning)
-            self.surrogate_model.fit(self._X, self._y)
+            self._surrogate_model.fit(self._X, self._y)
 
     def run_batches(self, Ninit=0, Nmcmc=0, batch_size=5, to_save=True):
         """
@@ -354,14 +376,17 @@ class GaussianProcessSearch:
             self.run_points(X)
         # Batches sampled from the acquisition function
         for __ in range(Nmcmc):
-            X = self._acquisition_samples(kappa=2.5, Nsamples=batch_size)
+            X = self._acquisition_samples(Nsamples=batch_size)
             self.run_points(X)
 
         if to_save:
             self.save_grid()
 
-    def surrogate_predict(self, X, kappa=0):
+    def surrogate_predict(self, X, kappa=0, undo_prior=False):
         r"""
+        TO DO:
+            - DOCS!
+
         Evaluates the surrogate model at positions `X`, such that
 
             .. math::
@@ -394,16 +419,17 @@ class GaussianProcessSearch:
             with warnings.catch_warnings():
                 warnings.simplefilter('ignore', category=UserWarning)
                 if isinstance(self._surrogate_model, GridSearchCV):
-                    mu, std = self.surrogate_model.best_estimator_.predict(
+                    mu, std = self._surrogate_model.best_estimator_.predict(
                             X, return_std=True)
                 else:
-                    mu, std = self.surrogate_model.predict(X, return_std=True)
+                    mu, std = self._surrogate_model.predict(X, return_std=True)
             ypred = mu + kappa * std
         else:
-            ypred = self.surrogate_model.predict(X)
+            ypred = self._surrogate_model.predict(X)
+
         # Again if 1D input return just a float
         if ndim == 1:
-            return ypred[0]
+            ypred = ypred[0]
         return ypred
 
     def _prior_transform(self, u):
@@ -439,16 +465,13 @@ class GaussianProcessSearch:
         X = numpy.core.records.fromarrays(X.T, names=self.params + ['target'])
         return X, logz
 
-    def _acquisition_samples(self, kappa, Nsamples):
+    def _acquisition_samples(self, Nsamples):
         """
         Draws `Nsamples` samples from the acquisition function, calls the
         nested sampler (Dynesty).
 
         Parameters
         ----------
-        kappa : int
-            Acqusition function parameter. See class documentation for more
-            details.
         Nsamples : int
             Number of samples to be drawn from the acqusition function.
 
@@ -457,7 +480,7 @@ class GaussianProcessSearch:
         X : np.ndarray
             Samples drawn from the acquisition function.
         """
-        X = self._samples(kappa=kappa)
+        X = self._samples(kappa=self.kappa)
         if Nsamples > X.shape[0]:
             raise ValueError("Cannot ask for more samples `Nsamples = {}` than "
                              "the number of sampled points {}"
@@ -503,6 +526,11 @@ class GaussianProcessSearch:
         samples = dyfunc.resample_equal(results.samples, weights)
         if return_full:
             logl = dyfunc.resample_equal(results.logl, weights)
+            # We're only interested in the contribution to the evidence the
+            # likelihood (our target function). The uniform prior is used only
+            # to provide samples, hence undo its contribution.
+            logprior = -numpy.log(self._prior_max - self._prior_min).sum()
+            logz -= logprior
             return samples, logl, logz
         return samples
 
