@@ -19,9 +19,10 @@ from copy import deepcopy
 
 import numpy
 from scipy.stats import uniform
+
 from sklearn.gaussian_process import (GaussianProcessRegressor, kernels)
-from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import GridSearchCV
 from sklearn.exceptions import ConvergenceWarning
 import joblib
@@ -195,6 +196,11 @@ class GaussianProcessSearch:
         """
         Number of threads used to evaluate the target model. The acquisition
         function is sampled using a single thread.
+
+        Returns
+        -------
+        nthreads : int
+            Number of parallel threads.
         """
         return self._nthreads
 
@@ -255,6 +261,7 @@ class GaussianProcessSearch:
         else:
             self._surrogate_model = GridSearchCV(pipe, hyper_grid,
                                                  n_jobs=self.nthreads)
+
     @property
     def verbose(self):
         """
@@ -414,36 +421,83 @@ class GaussianProcessSearch:
         return self._pdist.ppf(u)
 
     def surrogate_posterior_samples(self):
+        """
+        Draws samples from the surrogate model defined by the Gaussian process,
+        calls the nested sampler (Dynesty) and also returns the log evidence.
+
+        Returns
+        -------
+        X : numpy.recarray
+            Samples drawn from the surrogate model.
+        logz : int
+            Log evidence as returned by the nested sampler.
+        """
         samples, target, logz = self._samples(kappa=0, return_full=True)
         X = numpy.hstack([samples, target.reshape(-1, 1)])
         X = numpy.core.records.fromarrays(X.T, names=self.params + ['target'])
         return X, logz
 
     def _acquisition_samples(self, kappa, Nsamples):
+        """
+        Draws `Nsamples` samples from the acquisition function, calls the
+        nested sampler (Dynesty).
+
+        Parameters
+        ----------
+        kappa : int
+            Acqusition function parameter. See class documentation for more
+            details.
+        Nsamples : int
+            Number of samples to be drawn from the acqusition function.
+
+        Returns
+        -------
+        X : np.ndarray
+            Samples drawn from the acquisition function.
+        """
         return self._samples(kappa=kappa, Nsamples=Nsamples)
 
-    def _samples(self, kappa, Nsamples=None, return_full=False):
+    def _samples(self, kappa, return_full=False):
+        """
+        Draws samples from the surrogate model (optionally the acquisition
+        function). Calls `dynesty.NestedSampler`. Runs on a single thread even
+        if `self.nthreads > 1`.
+
+        Parameters
+        ----------
+        kappa : int
+            Acquisition function parameter. See class documentation for more
+            information.
+        return_full : bool, optional
+            Whether to also return the sampled log-target values and the
+            target evidence.
+
+        Returns
+        -------
+        samples : np.ndarray
+            Sampled points from the surrogate model.
+        logtarget : np.ndarray
+            Optionally returned if `return_full=True`, the surrogate model
+            target values.
+        logz : int
+            Optionally returned if `return_full=True`, the surrogate model
+            evidence.
+        """
         sampler = NestedSampler(
                 self.surrogate_predict, self._prior_transform,
-                ndim=len(self.params), logl_kwargs={'kappa': kappa}, rstate=self.generator)
+                ndim=len(self.params), logl_kwargs={'kappa': kappa},
+                rstate=self.generator)
         sampler.run_nested()
+
         results = sampler.results
-
         logz = results.logz[-1]
-
         weights = numpy.exp(results.logwt - logz)
+        # Resample from the posterior
         samples = dyfunc.resample_equal(results.samples, weights)
-
-        if Nsamples is not None:
-            m = self.generator.choice(samples.shape[0], Nsamples, replace=False)
-        else:
-            m = numpy.ones(samples.shape[0], dtype=bool)
-
         if return_full:
             logl = dyfunc.resample_equal(results.logl, weights)
-            return samples[m, :], logl[m], logz
-
-        return samples[m, :]
+            return samples, logl, logz
+        return samples
 
     def _uniform_samples(self, N):
         """
@@ -459,7 +513,8 @@ class GaussianProcessSearch:
         points : numpy.ndarray (N, 2)
             Randomly sampled points.
         """
-        return self.generator.uniform(low=self._prior_min, high=self._prior_max, size=(N, 2))
+        return self.generator.uniform(low=self._prior_min,
+                                      high=self._prior_max, size=(N, 2))
 
     @property
     def positions(self):
@@ -503,8 +558,10 @@ class GaussianProcessSearch:
 
     def save_checkpoint(self):
         """
-        DOCS
+        Checkpoints the grid.
 
+        Stores its parameters, model (`self.current_state`), sampled
+        points (`self._X`, `self._y`), and the current random state.
         """
         checkpoint = self.current_state
         if self.verbose:
@@ -512,20 +569,22 @@ class GaussianProcessSearch:
         joblib.dump(checkpoint, self._checkpoint_path)
 
     def save_grid(self):
+        """
+        Saves the grid results upon termination (grid checkpoint, surrogate
+        model samples and surrogate model evidence).
+        """
         if self.verbose:
             print("Generating the final samples from the surrogate model.")
         samples, logz = self.surrogate_posterior_samples()
-
-        # Create output folder too?
+        # Optionally create the output folder
         fpath = './out/{}/'.format(self.name)
         if not os.path.exists(fpath):
             os.makedirs(fpath)
         # Save the evidence
         with open(fpath + 'logz.txt', 'w') as f:
             f.write(str(logz))
-
-        checkpoint = self.current_state
         # Save the checkpoint
+        checkpoint = self.current_state
         joblib.dump(checkpoint, fpath + 'checkpoint.z')
         # Save the samples
         numpy.save(fpath + 'surrogate_samples.npy', samples)
@@ -549,7 +608,7 @@ class GaussianProcessSearch:
 
         Returns
         -------
-        grid : BayesianGridSearch object
+        grid : `BayesianGridSearch` object
             Grid search object initialised from the checkpoint.
         """
         X = checkpoint.pop('X', None)
@@ -557,10 +616,11 @@ class GaussianProcessSearch:
         grid = cls(**checkpoint)
         grid._X = X
         grid._y = y
+        # Save the random generator state and roll it back after fitting
         generator0 = grid.generator
         grid._refit_gp()
         grid.generator = generator0
-        # If any new points sample those right now
+        # If any new points sample those
         if Xnew is not None:
             grid.run_points(Xnew)
         return grid
