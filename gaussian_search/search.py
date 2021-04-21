@@ -44,16 +44,18 @@ class GaussianProcessSearch:
         make a getdist corner plot
 
         - correct switching between grid and a single model (TEST)
-
-        - add setters for inputs
-
     """
 
 
-    def __init__(self, run_name, params, model, bounds, nthreads=1,
+    def __init__(self, name, params, model, bounds, nthreads=1,
                  gp=None, hyper_grid=None, random_state=None, verbose=True):
+        self._name = None
+        self._params = None
+        self._model = None
         self._bounds = None
+        self._nthreads = None
         self._pdist = None
+        self._verbose = None
         self._X = None
         self._y = None
         self._surrogate_model = None
@@ -61,64 +63,94 @@ class GaussianProcessSearch:
         self._prior_min = None
         self._prior_width = None
 
+        self.name = name
+        self.params = params
+        self.model = model
+        self.bounds = bounds
+        self.nthreads = nthreads
+        self._initialise_gp(gp, hyper_grid)
+        # Set the random state
         if isinstance(random_state, numpy.random.RandomState):
             self.generator = random_state
         else:
             self.generator = numpy.random.RandomState(random_state)
-
-        # Will have to add setters for these
-        self.model = model
-        self.params = params
-        self.bounds = bounds
-        self.nthreads = nthreads
-        self.run_name = run_name
         self.verbose = verbose
         # Check if the temporary results folder exists
         if not os.path.exists('./temp/'):
             os.mkdir('./temp/')
         # Warn if the checkpoint file exists
-        self._checkpoint_path = './temp/checkpoint_{}.z'.format(self.run_name)
+        self._checkpoint_path = './temp/checkpoint_{}.z'.format(self.name)
         if os.path.isfile(self._checkpoint_path):
             warnings.warn("Temporal checkpoint at {} exists, will be "
                           "overwritten.".format(self._checkpoint_path),
                           UserWarning)
-        # Get the Gaussian process regressor/grid search
-        self._initialise_gp(gp, hyper_grid)
-        # State will be used to restart the grid search
-        self._state = {'params': self.params,
-                       'run_name': self.run_name,
+        # Will be used to checkpoint the grid search
+        self._state = {'name': self.name,
+                       'params': self.params,
                        'model': self.model,
-                       'nthreads': self.nthreads,
                        'bounds': self.bounds,
+                       'nthreads': self.nthreads,
                        'gp': gp,
                        'hyper_grid': hyper_grid,
                        'verbose': self.verbose}
 
-    def _initialise_gp(self, gp, hyper_grid):
+    @property
+    def name(self):
         """
-        Docs.
+        Name of this grid search run. Used to store outputs.
 
+        Returns
+        -------
+        name : str
+            Run name.
         """
-        # Set up the Gaussian process, pipeline and grid search
-        if gp is not None and type(gp) is not GaussianProcessRegressor:
-            raise ValueError("`gp` must be of {} type."
-                             .format(type(GaussianProcessRegressor())))
+        return self._name
 
-        if gp is None:
-            gp = GaussianProcessRegressor(kernels.Matern(nu=2.5),
-                    alpha=1e-6, normalize_y=True, n_restarts_optimizer=5,
-                    random_state=self.generator)
+    @name.setter
+    def name(self, name):
+        """
+        Sets `name`.
+        """
+        if not isinstance(name, str):
+            raise TypeError("`name` '{}' must be of str type.".format(name))
+        self._name = name
 
-        pipe = Pipeline([('scaler', StandardScaler()),
-                         ('gp', gp)])
+    @property
+    def params(self):
+        """
+        Grid search's parameters passed into `self.model`.
 
-        if hyper_grid is not None:
-            self._is_grid = True
-            self._surrogate_model = GridSearchCV(pipe, hyper_grid,
-                                                 n_jobs=self.nthreads)
-        else:
-            self._surrogate_model = pipe
-            self._is_grid = False
+        Returns
+        -------
+        params : list of str
+            Parameter names.
+        """
+        return self._params
+
+    @params.setter
+    def params(self, params):
+        """
+        Sets `params`. Ensures it is a list of strings.
+        """
+        if not isinstance(params, (list, tuple)):
+            raise TypeError("`params` must be a list.")
+        params = list(params)
+        for par in params:
+            if not isinstance(par, str):
+                raise TypeError("Parameter '{}' must be a string".format(par))
+        self._params = params
+
+    @property
+    def model(self):
+        """
+        Target model approximated by the surrogate Gaussian process model.
+
+        Returns
+        -------
+        model : py:function
+            Target model.
+        """
+        return self._model
 
     @property
     def bounds(self):
@@ -157,6 +189,92 @@ class GaussianProcessSearch:
         self._prior_max = numpy.array([bnd[1] for bnd in self.bounds.values()])
         self._pdist = uniform(loc=self._prior_min,
                               scale=self._prior_max - self._prior_min)
+
+    @property
+    def nthreads(self):
+        """
+        Number of threads used to evaluate the target model. The acquisition
+        function is sampled using a single thread.
+        """
+        return self._nthreads
+
+    @nthreads.setter
+    def nthreads(self, nthreads):
+        """
+        Sets `nthreads`. Ensures it is an integer.
+        """
+        if nthreads is None:
+            self._nthreads = 1
+        else:
+            if not isinstance(nthreads, int):
+                raise TypeError("`nthreads` must be of int type.")
+            self._nthreads = nthreads
+
+    def _initialise_gp(self, gp, hyper_grid):
+        """
+        Initialises the Gaussian process surrogate model. If `gp` is `None`
+        uses the default kernel and Gaussian process:
+
+            `kernel = sklearn.gaussian_process.kernels.Matern(nu=2.5)`
+            `gp = sklearn.gaussian_process.GaussianProcessRegressor(
+                kernel, alpha=1e-6, normalize_y=True, n_restarts_optimizer=5,
+                random_state=self.generator)`,
+
+        such that `random_state` is always set to the class generator. The
+        data is always scaled using `sklearn.preprocessing.StandardScaler`.
+
+        If `hyper_grid` is not `None` the best fit combination will be used
+        as a surrogate model (calls `sklearn.model_selection.GridSearchCV`)
+        with 5-fold cross-validation.
+
+        Parameters
+        ----------
+        gp : None or `sklearn.gaussian_process.GaussianProcessRegressor`
+            Surrogate model Gaussian process.
+        hyper_grid : None or dict of dictionaries
+            Hyperparameter grid to be explored when fitting the Gaussian
+            process.
+        """
+        # Set up the Gaussian process, pipeline and grid search
+        if gp is None:
+            gp = GaussianProcessRegressor(kernels.Matern(nu=2.5),
+                    alpha=1e-6, normalize_y=True, n_restarts_optimizer=5,
+                    random_state=self.generator)
+        elif type(gp) != GaussianProcessRegressor:
+            raise TypeError("`gp` must be of {} type."
+                            .format(GaussianProcessRegressor))
+        else:
+            # Always overwrite the random state
+            gp.random_state = self.generator
+        # Set up the pipeline to scale the data
+        pipe = Pipeline([('scaler', StandardScaler()),
+                         ('gp', gp)])
+        # Optionally set the hyperparameter grid
+        if hyper_grid is None:
+            self._surrogate_model = pipe
+        else:
+            self._surrogate_model = GridSearchCV(pipe, hyper_grid,
+                                                 n_jobs=self.nthreads)
+    @property
+    def verbose(self):
+        """
+        Whether to print checkpoint messages.
+
+        Returns
+        -------
+        verbose : bool
+            Verbosity flag.
+        """
+        return self_verbose
+
+    @verbose.setter
+    def verbose(self, verbose):
+        """
+        Sets `verbose`. Checks it is a bool.
+        """
+        if not isinstance(verbose, bool):
+            raise TypeError("`verbose` must be of bool type")
+        self._verbose = verbose
 
     def run_points(self, X, to_save=False):
         """
@@ -258,22 +376,23 @@ class GaussianProcessSearch:
         ypred : numpy.ndarray
             Array of predicted values.
         """
+        # Needs to be reshaped for the predictor if 1D array
         ndim = X.ndim
         if ndim == 1:
             X = X.reshape(1, -1)
-
         if kappa != 0:
             # GaussianRegressor raises warning when std=0. Silence it
             with warnings.catch_warnings():
                 warnings.simplefilter('ignore', category=UserWarning)
-                if self._is_grid:
-                    mu, std = self.surrogate_model.best_estimator_.predict(X, return_std=True)
+                if type(self._surrogate_model) == GridSearchCV:
+                    mu, std = self.surrogate_model.best_estimator_.predict(
+                            X, return_std=True)
                 else:
                     mu, std = self.surrogate_model.predict(X, return_std=True)
             ypred = mu + kappa * std
         else:
             ypred = self.surrogate_model.predict(X)
-
+        # Again if 1D input return just a float
         if ndim == 1:
             return ypred[0]
         return ypred
@@ -398,7 +517,7 @@ class GaussianProcessSearch:
         samples, logz = self.surrogate_posterior_samples()
 
         # Create output folder too?
-        fpath = './out/{}/'.format(self.run_name)
+        fpath = './out/{}/'.format(self.name)
         if not os.path.exists(fpath):
             os.makedirs(fpath)
         # Save the evidence
