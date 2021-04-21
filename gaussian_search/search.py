@@ -13,24 +13,21 @@
 # with this program; if not, write to the Free Software Foundation, Inc.,
 # 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
-import numpy
-
 import os
+import warnings
 from copy import deepcopy
 
+import numpy
+from scipy.stats import uniform
 from sklearn.gaussian_process import (GaussianProcessRegressor, kernels)
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
 from sklearn.model_selection import GridSearchCV
 from sklearn.exceptions import ConvergenceWarning
-import warnings
+import joblib
 
 from dynesty import NestedSampler
 from dynesty import utils as dyfunc
-
-from joblib import Parallel, delayed, dump, load
-
-from scipy.stats import uniform
 
 
 class GaussianProcessSearch:
@@ -54,7 +51,7 @@ class GaussianProcessSearch:
 
 
     def __init__(self, run_name, params, model, bounds, nthreads=1,
-                 gp=None, hyper_grid=None, random_state=None):
+                 gp=None, hyper_grid=None, random_state=None, verbose=True):
         self._bounds = None
         self._pdist = None
         self._X = None
@@ -75,6 +72,7 @@ class GaussianProcessSearch:
         self.bounds = bounds
         self.nthreads = nthreads
         self.run_name = run_name
+        self.verbose = verbose
         # Check if the temporary results folder exists
         if not os.path.exists('./temp/'):
             os.mkdir('./temp/')
@@ -85,9 +83,7 @@ class GaussianProcessSearch:
                           "overwritten.".format(self._checkpoint_path),
                           UserWarning)
         # Get the Gaussian process regressor/grid search
-        self.surrogate_model, self._is_grid = self._init_gp(
-                gp, hyper_grid, nthreads, self.generator)
-        # print('Randoms: ', self._pdist.rvs(size=2))
+        self._initialise_gp(gp, hyper_grid)
         # State will be used to restart the grid search
         self._state = {'params': self.params,
                        'run_name': self.run_name,
@@ -95,10 +91,14 @@ class GaussianProcessSearch:
                        'nthreads': self.nthreads,
                        'bounds': self.bounds,
                        'gp': gp,
-                       'hyper_grid': hyper_grid}
+                       'hyper_grid': hyper_grid,
+                       'verbose': self.verbose}
 
-    @staticmethod
-    def _init_gp(gp, hyper_grid, nthreads, generator):
+    def _initialise_gp(self, gp, hyper_grid):
+        """
+        Docs.
+
+        """
         # Set up the Gaussian process, pipeline and grid search
         if gp is not None and type(gp) is not GaussianProcessRegressor:
             raise ValueError("`gp` must be of {} type."
@@ -107,18 +107,18 @@ class GaussianProcessSearch:
         if gp is None:
             gp = GaussianProcessRegressor(kernels.Matern(nu=2.5),
                     alpha=1e-6, normalize_y=True, n_restarts_optimizer=5,
-                    random_state=generator)
+                    random_state=self.generator)
 
         pipe = Pipeline([('scaler', StandardScaler()),
                          ('gp', gp)])
 
         if hyper_grid is not None:
-            is_grid = True
-            surrogate_model = GridSearchCV(pipe, hyper_grid, n_jobs=nthreads)
+            self._is_grid = True
+            self._surrogate_model = GridSearchCV(pipe, hyper_grid,
+                                                 n_jobs=self.nthreads)
         else:
-            surrogate_model = pipe
-            is_grid = False
-        return surrogate_model, is_grid
+            self._surrogate_model = pipe
+            self._is_grid = False
 
     @property
     def bounds(self):
@@ -155,8 +155,8 @@ class GaussianProcessSearch:
         # Prior uniform distribution for the target
         self._prior_min = numpy.array([bnd[0] for bnd in self.bounds.values()])
         self._prior_max = numpy.array([bnd[1] for bnd in self.bounds.values()])
-        self._pdist = uniform(loc=self._prior_min, scale=self._prior_max - self._prior_min)
-
+        self._pdist = uniform(loc=self._prior_min,
+                              scale=self._prior_max - self._prior_min)
 
     def run_points(self, X, to_save=False):
         """
@@ -177,8 +177,9 @@ class GaussianProcessSearch:
         points = [{attr: X[i, j] for j, attr in enumerate(self.params)}
                   for i in range(X.shape[0])]
         # Process the points in parallel
-        with Parallel(n_jobs=self.nthreads) as par:
-            targets = par(delayed(self.model)(**point) for point in points)
+        with joblib.Parallel(n_jobs=self.nthreads) as par:
+            targets = par(joblib.delayed(self.model)(**point)
+                          for point in points)
         # Append the results
         if self._X is None:
             self._X = X
@@ -188,6 +189,7 @@ class GaussianProcessSearch:
             self._y = numpy.hstack([self._y, targets])
         self._refit_gp()
         self.save_checkpoint()
+
         if to_save:
             self.save_grid()
 
@@ -232,6 +234,30 @@ class GaussianProcessSearch:
             self.save_grid()
 
     def surrogate_predict(self, X, kappa=0):
+        r"""
+        Evaluates the surrogate model at positions `X`, such that
+
+            .. math::
+                y = \mu + \kappa * \sigma,
+
+        where :math:`\mu` and :math:`\sigma` is the mean and standard
+        devitation of the fitted Gaussian process regressor at `X`.
+        Non-zero values of :math:`\kappa` are used in the acquisition function
+        to reward exploring unknown areas of the prior space.
+
+        Parameters
+        ----------
+        X : numpy.ndarray (Npoints, Nfeatures)
+            Array of positions to be evaluated by the surrogate model.
+        kappa : int, optional
+            Parameter controlling the contribution of the Gaussian process's
+            standar deviation. By default 0.
+
+        Returns
+        -------
+        ypred : numpy.ndarray
+            Array of predicted values.
+        """
         ndim = X.ndim
         if ndim == 1:
             X = X.reshape(1, -1)
@@ -264,7 +290,7 @@ class GaussianProcessSearch:
         Returns
         -------
         sampled_points : numpy.ndarray
-            Array of points sampled from the prior.
+            Array of points from the prior corresponding to `u`.
         """
         return self._pdist.ppf(u)
 
@@ -362,11 +388,13 @@ class GaussianProcessSearch:
 
         """
         checkpoint = self.current_state
-        print("Checkpoint saved at {}".format(self._checkpoint_path))
-        dump(checkpoint, self._checkpoint_path)
+        if self.verbose:
+            print("Checkpoint saved at {}".format(self._checkpoint_path))
+        joblib.dump(checkpoint, self._checkpoint_path)
 
     def save_grid(self):
-        print("Generating the final samples from the surrogate model.")
+        if self.verbose:
+            print("Generating the final samples from the surrogate model.")
         samples, logz = self.surrogate_posterior_samples()
 
         # Create output folder too?
@@ -379,9 +407,11 @@ class GaussianProcessSearch:
 
         checkpoint = self.current_state
         # Save the checkpoint
-        dump(checkpoint, fpath + 'checkpoint.z')
+        joblib.dump(checkpoint, fpath + 'checkpoint.z')
         # Save the samples
         numpy.save(fpath + 'surrogate_samples.npy', samples)
+        if self.verbose:
+            print("Outputs saved at {}.".format(fpath))
         # Remove the temporary checkpoint
         os.remove(self._checkpoint_path)
 
@@ -408,9 +438,7 @@ class GaussianProcessSearch:
         grid = cls(**checkpoint)
         grid._X = X
         grid._y = y
-        # Refit the GP
-        print("Refitting the Gaussian process surrogate model.")
-        generator0 = deepcopy(grid.generator)
+        generator0 = grid.generator
         grid._refit_gp()
         grid.generator = generator0
         # If any new points sample those right now
