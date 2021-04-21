@@ -51,7 +51,8 @@ class GaussianProcessSearch:
 
 
     def __init__(self, name, params, model, bounds, nthreads=1, kappa=2.5,
-                 gp=None, hyper_grid=None, random_state=None, verbose=True):
+                 gp=None, hyper_grid=None, random_state=None, verbose=True,
+                 sampler_kwargs=None):
         self._name = None
         self._params = None
         self._model = model
@@ -65,6 +66,10 @@ class GaussianProcessSearch:
         self._surrogate_model = None
         self._prior_min = None
         self._prior_width = None
+        if sampler_kwargs is None:
+            self._sampler_kwargs = {}
+        else:
+            self._sampler_kwargs = sampler_kwargs
 
         # Set the random state
         if isinstance(random_state, numpy.random.RandomState):
@@ -307,7 +312,7 @@ class GaussianProcessSearch:
             raise TypeError("`verbose` must be of bool type")
         self._verbose = verbose
 
-    def run_points(self, X, to_save=False):
+    def run_points(self, X, to_save=False, kwargs=None):
         """
         Samples points specified by `X`, runs in parallel. After points are
         sampled retrains the Gaussian process.
@@ -322,6 +327,8 @@ class GaussianProcessSearch:
         nthreads : int
             Number of jobs to be run in parallel.
         """
+        if kwargs is None:
+            kwargs = {}
         # Unpack X into a list of dicts
         points = [{attr: X[i, j] for j, attr in enumerate(self.params)}
                   for i in range(X.shape[0])]
@@ -331,8 +338,8 @@ class GaussianProcessSearch:
                   .format(datetime.now(), len(points)))
 
         with joblib.Parallel(n_jobs=self.nthreads) as par:
-            targets = par(joblib.delayed(self.model)(**point)
-                          for point in points)
+            targets = par(joblib.delayed(self.model)(
+                **self._merge_dicts(point, kwargs)) for point in points)
         # Append the results
         if self._X is None:
             self._X = X
@@ -348,6 +355,26 @@ class GaussianProcessSearch:
         if to_save:
             self.save_grid()
 
+    @staticmethod
+    def _merge_dicts(dict1, dict2):
+        """
+        A quick method to merge two dictionaries.
+
+        Parameters
+        ----------
+        dict1 : dict
+            First dictionary.
+        dict2 : dict
+            Second dictionary.
+
+        Returns
+        -------
+        merged_dict : dict
+            Merge of `dict1` and `dict2`.
+        """
+        dict1.update(dict2)
+        return dict1
+
     def _refit_gp(self):
         """
         Refits the Gaussian process with internally stored points `self._X`
@@ -358,7 +385,8 @@ class GaussianProcessSearch:
             warnings.simplefilter('ignore', category=ConvergenceWarning)
             self._surrogate_model.fit(self._X, self._y)
 
-    def run_batches(self, Ninit=0, Nmcmc=0, batch_size=5, to_save=True):
+    def run_batches(self, Ninit=0, Nmcmc=0, batch_size=5, to_save=True,
+                    kwargs=None):
         """
         Samples `Ninit` and `Nmcmc` in batches of size `batch_size`.
 
@@ -379,11 +407,11 @@ class GaussianProcessSearch:
         # Initial batches sampled from the prior
         for __ in range(Ninit):
             X = self._uniform_samples(batch_size)
-            self.run_points(X)
+            self.run_points(X, kwargs=kwargs)
         # Batches sampled from the acquisition function
         for __ in range(Nmcmc):
             X = self._acquisition_samples(Nsamples=batch_size)
-            self.run_points(X)
+            self.run_points(X, kwargs=kwargs)
 
         if to_save:
             self.save_grid()
@@ -526,7 +554,7 @@ class GaussianProcessSearch:
         sampler = NestedSampler(
                 self.surrogate_predict, self._prior_transform,
                 ndim=len(self.params), logl_kwargs={'kappa': kappa},
-                rstate=self.generator)
+                rstate=self.generator, **self._sampler_kwargs)
         sampler.run_nested()
 
         results = sampler.results
