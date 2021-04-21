@@ -13,6 +13,8 @@
 # with this program; if not, write to the Free Software Foundation, Inc.,
 # 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
+"""Gaussian process grid search class."""
+
 import os
 import warnings
 from copy import deepcopy
@@ -169,7 +171,7 @@ class GaussianProcessSearch:
     def bounds(self, bounds):
         """Sets `bounds` and stores the uniform distributions."""
         if not isinstance(bounds, dict):
-            raise ValueError("`bounds` must be a dict.")
+            raise TypeError("`bounds` must be a dict.")
         # Check each parameter has a boundary
         for par in self.params:
             if not par in bounds.keys():
@@ -178,7 +180,7 @@ class GaussianProcessSearch:
         # Check each entry is a len-2 tuple
         for par, bound in bounds.items():
             if not isinstance(bound, (list, tuple)) or len(bounds) != 2:
-                raise ValueError("Parameter's '{}' boundary '{}' must be a "
+                raise TypeError("Parameter's '{}' boundary '{}' must be a "
                                  "len-2 tuple.".format(par, bound))
             # Ensure correct ordering
             if bound[0] > bound[1]:
@@ -246,7 +248,7 @@ class GaussianProcessSearch:
             gp = GaussianProcessRegressor(kernels.Matern(nu=2.5),
                     alpha=1e-6, normalize_y=True, n_restarts_optimizer=5,
                     random_state=self.generator)
-        elif type(gp) != GaussianProcessRegressor:
+        elif not isinstance(gp, GaussianProcessRegressor):
             raise TypeError("`gp` must be of {} type."
                             .format(GaussianProcessRegressor))
         else:
@@ -272,7 +274,7 @@ class GaussianProcessSearch:
         verbose : bool
             Verbosity flag.
         """
-        return self_verbose
+        return self._verbose
 
     @verbose.setter
     def verbose(self, verbose):
@@ -347,11 +349,11 @@ class GaussianProcessSearch:
             warnings.warn("Both `Ninit` and `Nmcmc` are 0, exiting.",
                            UserWarning)
         # Initial batches sampled from the prior
-        for i in range(Ninit):
+        for __ in range(Ninit):
             X = self._uniform_samples(batch_size)
             self.run_points(X)
         # Batches sampled from the acquisition function
-        for i in range(Nmcmc):
+        for __ in range(Nmcmc):
             X = self._acquisition_samples(kappa=2.5, Nsamples=batch_size)
             self.run_points(X)
 
@@ -391,7 +393,7 @@ class GaussianProcessSearch:
             # GaussianRegressor raises warning when std=0. Silence it
             with warnings.catch_warnings():
                 warnings.simplefilter('ignore', category=UserWarning)
-                if type(self._surrogate_model) == GridSearchCV:
+                if isinstance(self._surrogate_model, GridSearchCV):
                     mu, std = self.surrogate_model.best_estimator_.predict(
                             X, return_std=True)
                 else:
@@ -455,7 +457,12 @@ class GaussianProcessSearch:
         X : np.ndarray
             Samples drawn from the acquisition function.
         """
-        return self._samples(kappa=kappa, Nsamples=Nsamples)
+        X = self._samples(kappa=kappa)
+        if Nsamples > X.shape[0]:
+            raise ValueError("Cannot ask for more samples `Nsamples = {}` than "
+                             "the number of sampled points {}"
+                             .format(Nsamples, X.shape[0]))
+        return X[self.generator.choice(X.shape[0], Nsamples, replace=False), :]
 
     def _samples(self, kappa, return_full=False):
         """
