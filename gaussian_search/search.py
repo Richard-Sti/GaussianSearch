@@ -321,8 +321,10 @@ class GaussianProcessSearch:
         ----------
         X : numpy.ndarray (npoints, nfeatures)
             Array of points to be sampled.
-        nthreads : int
-            Number of jobs to be run in parallel.
+        to_save : bool
+            Whether to save the points upon evaluation. By default `False` and
+            newly sampled points are only saved upon termination. However a
+            checkpoint is always stored.
         kwargs : dict
             Keyword arguments passed into `self.model` that are not the sampled
             positions.
@@ -403,6 +405,9 @@ class GaussianProcessSearch:
             Batch size, determines how many points are sampled without
             without updating the surrogate Gaussian Process. Typically
             are evaluated in parallel.
+        to_save : bool
+            Whether to save the points upon evaluation. By default `True` and
+            newly sampled points are only saved upon termination.
         kwargs : dict
             Keyword arguments passed into `self.model` that are not the sampled
             positions.
