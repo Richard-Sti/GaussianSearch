@@ -37,32 +37,28 @@ from dynesty import utils as dyfunc
 class GaussianProcessSearch:
     """
     TO DO:
-        - Make possible to restart from a state (TEST)
-
-        - joblib parallel dumping may reduce the overhead, check this out
-
-        - determine KL divergence between current and last posterior whether
-        any more information is being gained
 
         - correct switching between grid and a single model (TEST)
-
-        - Refitting the GP becomes more and more expensive - increase batchsize
     """
 
 
-    def __init__(self, name, params, model, bounds, nthreads=1, kappa=2.5,
-                 gp=None, hyper_grid=None, random_state=None, verbose=True,
+    def __init__(self, name, params, logmodel, bounds, nthreads=1, kappa=5.,
+                 gp=None, hyper_grid=None, stopping_tolerance=None,
+                 patience=None, random_state=None, verbose=True,
                  sampler_kwargs=None):
         self._name = None
         self._params = None
-        self._model = model
+        self._logmodel = logmodel
         self._bounds = None
         self._nthreads = None
         self._kappa = None
         self._pdist = None
+        self._stopping_tolerance = None
+        self._patience = None
         self._verbose = None
         self._X = None
         self._y = None
+        self._blobs = None
         self._surrogate_model = None
         self._prior_min = None
         self._prior_width = None
@@ -84,6 +80,7 @@ class GaussianProcessSearch:
         self.kappa = kappa
         self._initialise_gp(gp, hyper_grid)
         self.verbose = verbose
+        self._set_stopping(stopping_tolerance, patience)
         # Check if the temporary results folder exists
         if not os.path.exists('./temp/'):
             os.mkdir('./temp/')
@@ -96,12 +93,16 @@ class GaussianProcessSearch:
         # Will be used to checkpoint the grid search
         self._state = {'name': self.name,
                        'params': self.params,
-                       'model': self.model,
                        'bounds': self.bounds,
                        'nthreads': self.nthreads,
                        'gp': gp,
                        'hyper_grid': hyper_grid,
                        'verbose': self.verbose}
+        # Will store the previous batch's fitted Gaussian process
+        self._previous_gp = None
+        # Count batches
+        self._batch_iter = 0
+        self._batch_entropies = []
 
     @property
     def name(self):
@@ -127,7 +128,7 @@ class GaussianProcessSearch:
     @property
     def params(self):
         """
-        Grid search's parameters passed into `self.model`.
+        Grid search's parameters passed into `self.logmodel`.
 
         Returns
         -------
@@ -150,16 +151,17 @@ class GaussianProcessSearch:
         self._params = params
 
     @property
-    def model(self):
+    def logmodel(self):
         """
-        Target model approximated by the surrogate Gaussian process model.
+        Logarithm (natural) of the target to be approximated by the surrogate
+        Gaussian process model.
 
         Returns
         -------
-        model : py:function
+        logmodel : py:function
             Target model.
         """
-        return self._model
+        return self._logmodel
 
     @property
     def bounds(self):
@@ -291,6 +293,51 @@ class GaussianProcessSearch:
             self._surrogate_model = GridSearchCV(pipe, hyper_grid,
                                                  n_jobs=self.nthreads)
 
+    def _set_stopping(self, stopping_tolerance, patience):
+        """
+        Sets the relative entropy termination parameters. Ensures either
+        both are `None` or both set.
+        """
+        if stopping_tolerance is None and patience is None:
+            return
+        err = ("`stopping_tolerance` and `patience` must either be both `None` "
+               "or both assigned values")
+        if stopping_tolerance is None and  patience is not None:
+            raise ValueError(err)
+        elif stopping_tolerance is not None and  patience is None:
+            raise ValueError(err)
+        if not isinstance(stopping_tolerance, float):
+            raise TypeError("`stopping_tolerance` must be of float type.")
+        if not isinstance(patience, int):
+            raise TypeError("`patience` must be of int type.")
+        self._stopping_tolerance = stopping_tolerance
+        self._patience = patience
+
+    @property
+    def stopping_tolerance(self):
+        """
+        Relative information gain fluctuation tolerance between batches.
+
+        Returns
+        -------
+        stopping_tolerance : float
+            Information gain tolerance.
+        """
+        return self._stopping_tolerance
+
+    @property
+    def patience(self):
+        """
+        Number of consecutive batch iterations that must satisfy stopping
+        tolerance to terminate the grid seach.
+
+        Returns
+        -------
+        patience : int
+            Number of patience batch iterations.
+        """
+        return self._patience
+
     @property
     def verbose(self):
         """
@@ -312,7 +359,7 @@ class GaussianProcessSearch:
             raise TypeError("`verbose` must be of bool type")
         self._verbose = verbose
 
-    def run_points(self, X, to_save=False, kwargs=None):
+    def run_points(self, X, to_save=False, kwargs=None, sample_posterior=True):
         """
         Samples points specified by `X`, runs in parallel. After points are
         sampled retrains the Gaussian process.
@@ -326,7 +373,7 @@ class GaussianProcessSearch:
             newly sampled points are only saved upon termination. However a
             checkpoint is always stored.
         kwargs : dict
-            Keyword arguments passed into `self.model` that are not the sampled
+            Keyword arguments passed into `self.logmodel` that are not the sampled
             positions.
         """
         if kwargs is None:
@@ -340,15 +387,32 @@ class GaussianProcessSearch:
                   .format(datetime.now(), len(points)))
 
         with joblib.Parallel(n_jobs=self.nthreads) as par:
-            targets = par(joblib.delayed(self.model)(
+            res = par(joblib.delayed(self.logmodel)(
                 **self._merge_dicts(point, kwargs)) for point in points)
+        # Figure out whether we have any blobs
+        if isinstance(res[0], tuple):
+            targets = [out[0] for out in res]
+            blobs = [out[1] for out in res]
+        else:
+            targets = res
+
         # Append the results
         if self._X is None:
             self._X = X
             self._y = numpy.array(targets)
+            # If we have any blobs store those
+            try:
+                self._blobs = blobs
+            except NameError:
+                pass
         else:
             self._X = numpy.vstack([self._X, X])
             self._y = numpy.hstack([self._y, targets])
+            try:
+                for blob in blobs:
+                    self._blobs.append(blob)
+            except NameError:
+                pass
         if self.verbose:
             print("{}: refitting the Gaussian process.".format(datetime.now()))
         self._refit_gp()
@@ -356,6 +420,9 @@ class GaussianProcessSearch:
 
         if to_save:
             self.save_grid()
+
+        # Bump up the batch iteration counter
+        self._batch_iter += 1
 
     @staticmethod
     def _merge_dicts(dict1, dict2):
@@ -382,6 +449,7 @@ class GaussianProcessSearch:
         Refits the Gaussian process with internally stored points `self._X`
         and `self._y`
         """
+        self._previous_gp = deepcopy(self._surrogate_model)
         # Silence convergence warning of the GaussianRegressor's optimiser
         with warnings.catch_warnings():
             warnings.simplefilter('ignore', category=ConvergenceWarning)
@@ -391,9 +459,8 @@ class GaussianProcessSearch:
                     kwargs=None):
         """
         Samples `Ninit` and `Nmcmc` in batches of size `batch_size`. If any
-        `kwargs` are passed, these will be memory-mapped to the disk for faster
-        parallel computation.
-
+        `kwargs` are passed, these will be memory-mapped to the disk for
+        faster parallel computation.
 
         Parameters
         ----------
@@ -409,8 +476,8 @@ class GaussianProcessSearch:
             Whether to save the points upon evaluation. By default `True` and
             newly sampled points are only saved upon termination.
         kwargs : dict
-            Keyword arguments passed into `self.model` that are not the sampled
-            positions.
+            Keyword arguments passed into `self.logmodel` that are not the
+            sampled positions.
         """
         memmap_path = None
         # If any kwargs passed in create a memory mapping
@@ -424,16 +491,35 @@ class GaussianProcessSearch:
             kwargs = joblib.load(memmap_path, mmap_mode='r')
 
         if Ninit == 0 and Nmcmc == 0:
-            warnings.warn("Both `Ninit` and `Nmcmc` are 0, exiting.",
-                           UserWarning)
+            raise ValueError("Both `Ninit` and `Nmcmc` are 0, exiting.")
+
         # Initial batches sampled from the prior
         for __ in range(Ninit):
             X = self._uniform_samples(batch_size)
             self.run_points(X, kwargs=kwargs)
         # Batches sampled from the acquisition function
+        to_early_terminate = False
         for __ in range(Nmcmc):
-            X = self._acquisition_samples(Nsamples=batch_size)
-            self.run_points(X, kwargs=kwargs)
+            X = self._acquisition_samples()
+
+            if batch_size > X.shape[0]:
+                raise ValueError("Cannot ask for larger batch size ({}) than "
+                                 "the number of sampled points {}"
+                                 .format(Nsamples, X.shape[0]))
+            # Down-sample the samples we will evaluate
+            mask = self.generator.choice(X.shape[0], batch_size, replace=False)
+            self.run_points(X[mask, :], kwargs=kwargs)
+            # Calculate the relative entropy with acqusition function samples
+            if self._batch_iter > 0:
+                entropy = self.relative_entropy(X)
+                self._batch_entropies.append([self._batch_iter, entropy])
+            if self._to_terminate():
+                if self.verbose:
+                    print("Terminating, entropy condition met.")
+                break
+
+        if self.verbose and not self._to_terminate():
+            print("Terminating, number of requested iterations reached.")
         # Clean up the memory mapping
         if memmap_path is not None:
             os.remove(memmap_path)
@@ -488,6 +574,27 @@ class GaussianProcessSearch:
             ypred = ypred[0]
         return ypred
 
+    def relative_entropy(self, samples):
+        """
+        Approximates the relative entropy (Kullback–Leibler divergence, i.e.
+        the information gain) between the currently fitted Gaussian process
+        and the previous Gaussian process.
+
+        Parameters
+        ----------
+        samples : numpy.ndarray
+            Samples from the target distribution.
+
+        Returns
+        -------
+        relative_entropy : float
+            The relative entropy between the current and previous Gaussian
+            process.
+        """
+        logP = self.surrogate_predict(samples)
+        logQ = self._previous_gp.predict(samples)
+        return numpy.sum(numpy.exp(logP) * (logP - logQ))
+
     def _prior_transform(self, u):
         """
         Inverse uniform cdf over the prior range for the nested sampler.
@@ -524,15 +631,10 @@ class GaussianProcessSearch:
         X = numpy.core.records.fromarrays(X.T, names=self.params + ['target'])
         return X, logz
 
-    def _acquisition_samples(self, Nsamples):
+    def _acquisition_samples(self):
         """
-        Draws `Nsamples` samples from the acquisition function, calls the
-        nested sampler (Dynesty).
-
-        Parameters
-        ----------
-        Nsamples : int
-            Number of samples to be drawn from the acqusition function.
+        Draws samples from the acquisition function, calls the nested sampler
+        (Dynesty).
 
         Returns
         -------
@@ -542,13 +644,7 @@ class GaussianProcessSearch:
         if self.verbose:
             print("{}: sampling the acquisition function."
                   .format(datetime.now()))
-
-        X = self._samples(kappa=self.kappa)
-        if Nsamples > X.shape[0]:
-            raise ValueError("Cannot ask for more samples `Nsamples = {}` than "
-                             "the number of sampled points {}"
-                             .format(Nsamples, X.shape[0]))
-        return X[self.generator.choice(X.shape[0], Nsamples, replace=False), :]
+        return self._samples(kappa=self.kappa)
 
     def _samples(self, kappa, return_full=False):
         """
@@ -588,13 +684,13 @@ class GaussianProcessSearch:
         # Resample from the posterior
         samples = dyfunc.resample_equal(results.samples, weights)
         if return_full:
-            logl = dyfunc.resample_equal(results.logl, weights)
+            logtarget = self.surrogate_predict(samples)
             # We're only interested in the contribution to the evidence the
             # likelihood (our target function). The uniform prior is used only
             # to provide samples, hence undo its contribution.
             logprior = -numpy.log(self._prior_max - self._prior_min).sum()
             logz -= logprior
-            return samples, logl, logz
+            return samples, logtarget, logz
         return samples
 
     def _uniform_samples(self, N):
@@ -613,6 +709,37 @@ class GaussianProcessSearch:
         """
         return self.generator.uniform(low=self._prior_min,
                                       high=self._prior_max, size=(N, 2))
+
+    def _to_terminate(self):
+        """
+        Whether to terminate the search, according to the information gain
+        criterion. For more information see class documentation.
+
+        Returns
+        -------
+        to_terminate : bool
+            Whether to terminate the grid search.
+        """
+        entropies = self.batch_entropies
+        entropies[:, 1] = numpy.abs(entropies[:, 1])
+        if entropies.shape[0] < self.patience:
+            return False
+        elif numpy.all(entropies[-self.patience:, 1] < self.stopping_tolerance):
+            return True
+        return False
+
+    @property
+    def batch_entropies(self):
+        """
+        Relative entropies between batches.
+
+        Returns
+        -------
+        batch_entropies : numpy.ndarray (Nbatches, 2)
+            Batches' relative entropy. Fist column is the batch iteration,
+            second column gives the relative entropy.
+        """
+        return numpy.array(self._batch_entropies)
 
     @property
     def positions(self):
@@ -640,6 +767,18 @@ class GaussianProcessSearch:
         return numpy.copy(self._y)
 
     @property
+    def blobs(self):
+        """
+        Blobs returned by the target model.
+
+        Returns
+        -------
+        blobs : list
+            List of blobs
+        """
+        return self._blobs
+
+    @property
     def current_state(self):
         """
         Current state of the grid search.
@@ -651,6 +790,7 @@ class GaussianProcessSearch:
         """
         self._state.update({'X': self._X,
                             'y': self._y,
+                            'blobs': self.blobs,
                             'random_state': deepcopy(self.generator)})
         return self._state
 
@@ -658,8 +798,7 @@ class GaussianProcessSearch:
         """
         Checkpoints the grid.
 
-        Stores its parameters, model (`self.current_state`), sampled
-        points (`self._X`, `self._y`), and the current random state.
+        Stores the sampled point along with the random state.
         """
         checkpoint = self.current_state
         if self.verbose:
@@ -671,32 +810,41 @@ class GaussianProcessSearch:
         Saves the grid results upon termination (grid checkpoint, surrogate
         model samples and surrogate model evidence).
         """
-        samples, logz = self.surrogate_posterior_samples()
-        # Optionally create the output folder
         fpath = './out/{}/'.format(self.name)
         if not os.path.exists(fpath):
             os.makedirs(fpath)
+        # Sample the surrogate model
+        samples, logz = self.surrogate_posterior_samples()
+        # Save the samples
+        numpy.save(fpath + "surrogate_samples.npy", samples)
         # Save the evidence
-        with open(fpath + 'logz.txt', 'w') as f:
+        with open(fpath + "logz.txt", 'w') as f:
             f.write(str(logz))
-        # Save the checkpoint
+        # Save the sampled points with blobs, if any
+        out = {'params': self.positions,
+               'stats': self.stats}
+        if self.blobs is not None:
+            out.update({'blobs': self.blobs})
+        joblib.dump(out, fpath + 'samples.z')
+        # Dump the checkpoint
         checkpoint = self.current_state
         joblib.dump(checkpoint, fpath + 'checkpoint.z')
-        # Save the samples
-        numpy.save(fpath + 'surrogate_samples.npy', samples)
         if self.verbose:
             print("Output saved at {}.".format(fpath))
         # Remove the temporary checkpoint
         os.remove(self._checkpoint_path)
 
     @classmethod
-    def from_checkpoint(cls, checkpoint, Xnew=None):
+    def from_checkpoint(cls, logmodel, checkpoint, Xnew=None):
         """
         Loads the grid search from a checkpoint. May manually assign points
         to sample.
 
         Parameters
         ----------
+        logmodel : py:func
+            Logarithmic target model. Must match the model used to get this
+            checkpoint.
         checkpoint : dict
             Checkpoint returned from `self.current_state`.
         Xnew : numpy.ndarray, optional
@@ -709,9 +857,11 @@ class GaussianProcessSearch:
         """
         X = checkpoint.pop('X', None)
         y = checkpoint.pop('y', None)
-        grid = cls(**checkpoint)
+        blobs = checkpoint.pop('blobs', None)
+        grid = cls(logmodel=logmodel, **checkpoint)
         grid._X = X
         grid._y = y
+        grid._blobs = blobs
         # Save the random generator state and roll it back after fitting
         generator0 = grid.generator
         grid._refit_gp()
