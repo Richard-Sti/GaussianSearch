@@ -6,9 +6,13 @@ Suggested points are sampled with a nested sampler (Dynesty) from the acquisitio
 
 ## TO DO
 [ ] Code documentation
+
 [ ] Project description on Github
+
 [ ] Pip install
+
 [ ] Example notebooks
+
 [ ] Unit testing
 
 
