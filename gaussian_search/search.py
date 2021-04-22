@@ -510,7 +510,7 @@ class GaussianProcessSearch:
             mask = self.generator.choice(X.shape[0], batch_size, replace=False)
             self.run_points(X[mask, :], kwargs=kwargs)
             # Calculate the relative entropy with acqusition function samples
-            if self._batch_iter > 0:
+            if self.stopping_tolerance is not None and self._batch_iter > 0:
                 entropy = self.relative_entropy(X)
                 self._batch_entropies.append([self._batch_iter, entropy])
             if self._to_terminate():
@@ -720,6 +720,8 @@ class GaussianProcessSearch:
         to_terminate : bool
             Whether to terminate the grid search.
         """
+        if self.stopping_tolerance is None:
+            return False
         entropies = self.batch_entropies
         entropies[:, 1] = numpy.abs(entropies[:, 1])
         if entropies.shape[0] < self.patience:
