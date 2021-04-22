@@ -498,14 +498,13 @@ class GaussianProcessSearch:
             X = self._uniform_samples(batch_size)
             self.run_points(X, kwargs=kwargs)
         # Batches sampled from the acquisition function
-        to_early_terminate = False
         for __ in range(Nmcmc):
             X = self._acquisition_samples()
 
             if batch_size > X.shape[0]:
                 raise ValueError("Cannot ask for larger batch size ({}) than "
                                  "the number of sampled points {}"
-                                 .format(Nsamples, X.shape[0]))
+                                 .format(batch_size, X.shape[0]))
             # Down-sample the samples we will evaluate
             mask = self.generator.choice(X.shape[0], batch_size, replace=False)
             self.run_points(X[mask, :], kwargs=kwargs)
