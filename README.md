@@ -5,15 +5,15 @@ GaussianSearch serves to sample computationally expensive functions, for which t
 Suggested points are sampled with a nested sampler (Dynesty) from the acquisition function, which is a sum of the Gaussian process mean and standard deviation, thus rewarding exploration.
 
 ## TO DO
-[ ] Code documentation
+- [ ] Code documentation
 
-[ ] Project description on Github
+- [ ] Project description on Github
 
-[ ] Pip install
+- [ ] Pip install
 
-[ ] Example notebooks
+- [ ] Example notebooks
 
-[ ] Unit testing
+- [ ] Unit testing
 
 
 ## License
