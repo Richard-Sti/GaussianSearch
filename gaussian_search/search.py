@@ -692,7 +692,7 @@ class GaussianProcessSearch:
                   .format(datetime.now()), flush=True)
         return self._samples(kappa=self.kappa)
 
-    def _samples(self, kappa, return_full=False):
+    def _samples(self, kappa, return_full=False, print_progress=False):
         """
         Draws samples from the surrogate model (optionally the acquisition
         function). Calls `dynesty.NestedSampler`. Runs on a single thread even
@@ -706,6 +706,8 @@ class GaussianProcessSearch:
         return_full : bool, optional
             Whether to also return the sampled log-target values and the
             target evidence.
+        print_progress : bool, optional
+            Whether to print the sampler's progress bar.
 
         Returns
         -------
@@ -722,7 +724,7 @@ class GaussianProcessSearch:
                 self.surrogate_predict, self._prior_transform,
                 ndim=len(self.params), logl_kwargs={'kappa': kappa},
                 rstate=self.generator, **self._sampler_kwargs)
-        sampler.run_nested(print_progress=False)
+        sampler.run_nested(print_progress=print_progress)
 
         results = sampler.results
         logz = results.logz[-1]
