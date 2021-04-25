@@ -720,7 +720,7 @@ class GaussianProcessSearch:
                 self.surrogate_predict, self._prior_transform,
                 ndim=len(self.params), logl_kwargs={'kappa': kappa},
                 rstate=self.generator, **self._sampler_kwargs)
-        sampler.run_nested()
+        sampler.run_nested(print_progress=False)
 
         results = sampler.results
         logz = results.logz[-1]
