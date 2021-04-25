@@ -13,7 +13,7 @@ setup(
                       'numpy',
                       'scikit-learn',
                       'joblib',
-                     ],
+                      'dynesty'],
 
     classifiers=[
         'Development Status :: 1 - Planning',
