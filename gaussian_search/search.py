@@ -439,8 +439,8 @@ class GaussianProcessSearch:
             Keyword arguments passed into `self.logmodel` that are not the sampled
             positions.
         """
-        if kwargs is None:
-            kwargs = {}
+#        if kwargs is None:
+#            kwargs = {}
         # Unpack X into a list of dicts
         points = [{attr: X[i, j] for j, attr in enumerate(self.params)}
                   for i in range(X.shape[0])]
@@ -450,8 +450,10 @@ class GaussianProcessSearch:
                   .format(datetime.now(), len(points)))
 
         with joblib.Parallel(n_jobs=self.nthreads) as par:
-            res = par(joblib.delayed(self.logmodel)(
-                **self._merge_dicts(point, kwargs)) for point in points)
+            if kwargs is None:
+                res = par(joblib.delayed(self.logmodel)(point) for point in points)
+            else:
+                res = par(joblib.delayed(self.logmodel)(point, **kwargs) for point in points)
         # Figure out whether we have any blobs
         if isinstance(res[0], tuple):
             targets = [out[0] for out in res]
@@ -486,26 +488,6 @@ class GaussianProcessSearch:
 
         # Bump up the batch iteration counter
         self._batch_iter += 1
-
-    @staticmethod
-    def _merge_dicts(dict1, dict2):
-        """
-        A quick method to merge two dictionaries.
-
-        Parameters
-        ----------
-        dict1 : dict
-            First dictionary.
-        dict2 : dict
-            Second dictionary.
-
-        Returns
-        -------
-        merged_dict : dict
-            Merge of `dict1` and `dict2`.
-        """
-        dict1.update(dict2)
-        return dict1
 
     def _refit_gp(self):
         """
