@@ -35,10 +35,73 @@ from dynesty import utils as dyfunc
 
 
 class GaussianProcessSearch:
-    """
-    TO DO:
+    r"""
+    GaussianProcessSearch is an adaptive grid search that builds a surrogate
+    Gaussian process model on top of the expensive likelihood, which serves
+    to decide which points to sample next to maximise the information gain and
+    to sample the surrogate model.
 
-        - correct switching between grid and a single model (TEST)
+    New points from either the surrogate model or the acquisition function are
+    sampled with `dynesty.NestedSampler`. The acquisition function is defined
+    as
+
+        . math::
+            y = \mu(x) + \kappa * \sigma(x),
+
+    where :math:`\mu` and :math:`\sigma` are the mean and standard devitation
+    of the Gaussian process at :math:`x`. :math:`kappa` controls exploration,
+    however new points are sampled from the acqusition function, not from the
+    peaks of the acquisition function, and therefore the model is capable of
+    exploring the parameter space well.
+
+    To achieve paralellisation new points are sampled in batches. Typically
+    this means that first :math:`N` points are sampled from the acquisition
+    function, then evaluated in parallel, and at the end the Gaussian process
+    is retrained before moving on to the next batch. First few batches are
+    distributed uniformly over the prior boundaries.
+
+    The grid search terminates after a given number of batches was explored or,
+    alternatively, after the information gain between batches has stagnated
+    (as measured by the KL divergence).
+
+    The grid search automatically checkpoints and can be easily restarted
+    from the checkpoints, at which point it can be instructed to also sample
+    user-specified points. Output is automatically dumped in `./out.`
+
+    Parameters
+    ----------
+    name : str
+        A unique name to distinguish this grid search run.
+    params : list of str
+        Target function's parameters.
+    logmodel : py:func
+        Logarithm of the target function.
+    bounds : dict
+        Dictionary of prior boundaries.
+    nthreads : int, optional
+        Number of threads. By default 1.
+    kappa : float, optional
+        Parameter controlling the acquisition function. Typically values that
+        are larger than 1 are sufficient. By default 5.
+    gp : `sklearn.gaussian_process.GaussianProcessRegressor`
+        The underlying Gaussian process and kernel. By default Matern kernel.
+    hyper_grid : dict, optional
+        Hyperparameter grid to be explored when fitting the Gaussian process.
+        By default `None`, the default hyperparameters are used.
+    stopping_tolerance : float, optional
+        Relative information gain between batches stopping tolerance. Typically
+        :math:`1e-3`. If the information gain is less than this threshold for
+        `self.patience` batches the grid search will terminate. By default
+        `None`, the grid search does not employ this termination strategy.
+    patience : int, optional
+        Number of batches to wait whether to terminate the grid search.
+    random_state : int, optional
+        Initial random state.
+    verbose : bool, optional
+        Verbosity flag, by default `True`.
+    sampler_kwargs : **kwargs
+        Keyword arguments passed into `dynesty.NestedSampler`. Includes
+        multiprocessing pool.
     """
 
 
