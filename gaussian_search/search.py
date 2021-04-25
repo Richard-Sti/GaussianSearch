@@ -447,7 +447,7 @@ class GaussianProcessSearch:
         # Process the points in parallel
         if self.verbose:
             print("{}: evaluating {} samples."
-                  .format(datetime.now(), len(points)))
+                  .format(datetime.now(), len(points)), flush=True)
 
         with joblib.Parallel(n_jobs=self.nthreads) as par:
             if kwargs is None:
@@ -479,7 +479,8 @@ class GaussianProcessSearch:
             except NameError:
                 pass
         if self.verbose:
-            print("{}: refitting the Gaussian process.".format(datetime.now()))
+            print("{}: refitting the Gaussian process.".format(datetime.now()),
+                  flush=True)
         self._refit_gp()
         self.save_checkpoint()
 
@@ -559,11 +560,12 @@ class GaussianProcessSearch:
                 self._batch_entropies.append([self._batch_iter, entropy])
             if self._to_terminate():
                 if self.verbose:
-                    print("Terminating, entropy condition met.")
+                    print("Terminating, entropy condition met.", flush=True)
                 break
 
         if self.verbose and not self._to_terminate():
-            print("Terminating, number of requested iterations reached.")
+            print("Terminating, number of requested iterations reached.",
+                  flush=True)
         # Clean up the memory mapping
         if memmap_path is not None:
             os.remove(memmap_path)
@@ -669,7 +671,7 @@ class GaussianProcessSearch:
         """
         if self.verbose:
             print("{}: sampling the surrogate model."
-                  .format(datetime.now()))
+                  .format(datetime.now()), flush=True)
         samples, target, logz = self._samples(kappa=0, return_full=True)
         X = numpy.hstack([samples, target.reshape(-1, 1)])
         X = numpy.core.records.fromarrays(X.T, names=self.params + ['target'])
@@ -687,7 +689,7 @@ class GaussianProcessSearch:
         """
         if self.verbose:
             print("{}: sampling the acquisition function."
-                  .format(datetime.now()))
+                  .format(datetime.now()), flush=True)
         return self._samples(kappa=self.kappa)
 
     def _samples(self, kappa, return_full=False):
@@ -848,7 +850,8 @@ class GaussianProcessSearch:
         """
         checkpoint = self.current_state
         if self.verbose:
-            print("Checkpoint saved at {}".format(self._checkpoint_path))
+            print("Checkpoint saved at {}".format(self._checkpoint_path),
+                   flush=True)
         joblib.dump(checkpoint, self._checkpoint_path)
 
     def save_grid(self):
@@ -876,7 +879,7 @@ class GaussianProcessSearch:
         checkpoint = self.current_state
         joblib.dump(checkpoint, fpath + 'checkpoint.z')
         if self.verbose:
-            print("Output saved at {}.".format(fpath))
+            print("Output saved at {}.".format(fpath), flush=True)
         # Remove the temporary checkpoint
         os.remove(self._checkpoint_path)
 
