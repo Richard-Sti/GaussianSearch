@@ -1,0 +1,5 @@
+numpy>=1.17.0
+scipy>=0.16.0
+scikit-learn>=0.23.0
+joblib>=1.0.0
+dynesty>=1.1
