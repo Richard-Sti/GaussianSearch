@@ -852,7 +852,6 @@ class GaussianProcessSearch:
         self._state.update({'X': self._X,
                             'y': self._y,
                             'blobs': self.blobs,
-                            'surrogate_model': self._surrogate_model,
                             'random_state': self.generator})
         return self._state
 
@@ -919,10 +918,9 @@ class GaussianProcessSearch:
         X = checkpoint.pop('X', None)
         y = checkpoint.pop('y', None)
         blobs = checkpoint.pop('blobs', None)
-        surrogate_model = checkpoint.pop('surrogate_model', None)
         grid = cls(logmodel=logmodel, **checkpoint)
         grid._X = X
         grid._y = y
         grid._blobs = blobs
-        grid._surrogate_model = surrogate_model
+        grid._refit_gp()
         return grid
