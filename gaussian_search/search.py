@@ -339,7 +339,8 @@ class GaussianProcessSearch:
             kernel = kernels.Matern(nu=2.5)
             gp = GaussianProcessRegressor(kernel, alpha=1e-6, normalize_y=True,
                                           n_restarts_optimizer=5,
-                                          random_state=self.generator)
+                                          random_state=self.generator,
+                                          copy_X_train=False)
         elif not isinstance(gp, GaussianProcessRegressor):
             raise TypeError("`gp` must be of {} type."
                             .format(GaussianProcessRegressor))
@@ -481,9 +482,6 @@ class GaussianProcessSearch:
                     self._blobs.append(blob)
             except NameError:
                 pass
-        if self.verbose:
-            print("{}: refitting the Gaussian process.".format(datetime.now()),
-                  flush=True)
 
         if to_refit:
             self._refit_gp()
@@ -500,6 +498,9 @@ class GaussianProcessSearch:
         Refits the Gaussian process with internally stored points `self._X`
         and `self._y`
         """
+        if self.verbose:
+            print("{}: refitting the Gaussian process.".format(datetime.now()))
+            sys.stdout.flush()
         self._previous_gp = deepcopy(self._surrogate_model)
         # Silence convergence warning of the GaussianRegressor's optimiser
         with warnings.catch_warnings():
@@ -568,12 +569,13 @@ class GaussianProcessSearch:
                 self._batch_entropies.append([self._batch_iter, entropy])
             if self._to_terminate():
                 if self.verbose:
-                    print("Terminating, entropy condition met.", flush=True)
+                    print("Terminating, entropy condition met.")
+                    sys.stdout.flush()
                 break
 
         if self.verbose and not self._to_terminate():
-            print("Terminating, number of requested iterations reached.",
-                  flush=True)
+            print("Terminating, number of requested iterations reached.")
+            sys.stdout.flush()
         # Clean up the memory mapping
         if memmap_path is not None:
             os.remove(memmap_path)
@@ -678,8 +680,8 @@ class GaussianProcessSearch:
             Log evidence as returned by the nested sampler.
         """
         if self.verbose:
-            print("{}: sampling the surrogate model."
-                  .format(datetime.now()), flush=True)
+            print("{}: sampling the surrogate model.".format(datetime.now()))
+            sys.stdout.flush()
         samples, target, logz = self._samples(kappa=0, return_full=True)
         X = numpy.hstack([samples, target.reshape(-1, 1)])
         X = numpy.core.records.fromarrays(X.T, names=self.params + ['target'])
@@ -697,7 +699,8 @@ class GaussianProcessSearch:
         """
         if self.verbose:
             print("{}: sampling the acquisition function."
-                  .format(datetime.now()), flush=True)
+                  .format(datetime.now()))
+            sys.stdout.flush()
         return self._samples(kappa=self.kappa)
 
     def _samples(self, kappa, return_full=False, print_progress=False):
@@ -849,7 +852,8 @@ class GaussianProcessSearch:
         self._state.update({'X': self._X,
                             'y': self._y,
                             'blobs': self.blobs,
-                            'random_state': deepcopy(self.generator)})
+                            'surrogate_model': self._surrogate_model,
+                            'random_state': self.generator})
         return self._state
 
     def save_checkpoint(self):
@@ -860,8 +864,8 @@ class GaussianProcessSearch:
         """
         checkpoint = self.current_state
         if self.verbose:
-            print("Checkpoint saved at {}".format(self._checkpoint_path),
-                  flush=True)
+            print("Checkpoint saved at {}".format(self._checkpoint_path))
+            sys.stdout.flush()
         joblib.dump(checkpoint, self._checkpoint_path)
 
     def save_grid(self):
@@ -889,7 +893,8 @@ class GaussianProcessSearch:
         checkpoint = self.current_state
         joblib.dump(checkpoint, fpath + 'checkpoint.z')
         if self.verbose:
-            print("Output saved at {}.".format(fpath), flush=True)
+            print("Output saved at {}.".format(fpath))
+            sys.stdout.flush()
         # Remove the temporary checkpoint
         os.remove(self._checkpoint_path)
 
@@ -914,12 +919,10 @@ class GaussianProcessSearch:
         X = checkpoint.pop('X', None)
         y = checkpoint.pop('y', None)
         blobs = checkpoint.pop('blobs', None)
+        surrogate_model = checkpoint.pop('surrogate_model', None)
         grid = cls(logmodel=logmodel, **checkpoint)
         grid._X = X
         grid._y = y
         grid._blobs = blobs
-        # Save the random generator state and roll it back after fitting
-        generator0 = grid.generator
-        grid._refit_gp()
-        grid.generator = generator0
+        grid._surrogate_model = surrogate_model
         return grid
