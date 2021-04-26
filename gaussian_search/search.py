@@ -16,6 +16,7 @@
 """Gaussian process grid search class."""
 
 import os
+import sys
 import warnings
 from datetime import datetime
 from copy import deepcopy
@@ -421,7 +422,7 @@ class GaussianProcessSearch:
             raise TypeError("`verbose` must be of bool type")
         self._verbose = verbose
 
-    def run_points(self, X, to_save=False, kwargs=None, sample_posterior=True):
+    def run_points(self, X, to_save=False, kwargs=None, to_refit=True):
         """
         Samples points specified by `X`, runs in parallel. After points are
         sampled retrains the Gaussian process.
@@ -430,21 +431,24 @@ class GaussianProcessSearch:
         ----------
         X : numpy.ndarray (npoints, nfeatures)
             Array of points to be sampled.
-        to_save : bool
+        to_save : bool, optional
             Whether to save the points upon evaluation. By default `False` and
             newly sampled points are only saved upon termination. However a
             checkpoint is always stored.
-        kwargs : dict
+        kwargs : dict, optional
             Keyword arguments passed into `self.logmodel` that are not the
             sampled positions.
+        to_refit : bool, optional
+            Whether to refit the Gaussian process. By default `True`.
         """
         # Unpack X into a list of dicts
         points = [{attr: X[i, j] for j, attr in enumerate(self.params)}
                   for i in range(X.shape[0])]
         # Process the points in parallel
         if self.verbose:
-            print("{}: evaluating {} samples."
-                  .format(datetime.now(), len(points)), flush=True)
+            print("{}: evaluating {} samples.".format(datetime.now(),
+                                                      len(points)))
+            sys.stdout.flush()
 
         with joblib.Parallel(n_jobs=self.nthreads) as par:
             if kwargs is None:
@@ -480,7 +484,9 @@ class GaussianProcessSearch:
         if self.verbose:
             print("{}: refitting the Gaussian process.".format(datetime.now()),
                   flush=True)
-        self._refit_gp()
+
+        if to_refit:
+            self._refit_gp()
         self.save_checkpoint()
 
         if to_save:
@@ -539,9 +545,12 @@ class GaussianProcessSearch:
             raise ValueError("Both `Ninit` and `Nmcmc` are 0, exiting.")
 
         # Initial batches sampled from the prior
-        for __ in range(Ninit):
+        for i in range(Ninit):
             X = self._uniform_samples(batch_size)
-            self.run_points(X, kwargs=kwargs)
+            if i != Ninit - 1:
+                self.run_points(X, kwargs=kwargs, to_refit=False)
+            else:
+                self.run_points(X, kwargs=kwargs, to_refit=True)
         # Batches sampled from the acquisition function
         for __ in range(Nmcmc):
             X = self._acquisition_samples()
@@ -552,7 +561,7 @@ class GaussianProcessSearch:
                                  .format(batch_size, X.shape[0]))
             # Down-sample the samples we will evaluate
             mask = self.generator.choice(X.shape[0], batch_size, replace=False)
-            self.run_points(X[mask, :], kwargs=kwargs)
+            self.run_points(X[mask, :], kwargs=kwargs, to_refit=True)
             # Calculate the relative entropy with acqusition function samples
             if self.stopping_tolerance is not None and self._batch_iter > 0:
                 entropy = self.relative_entropy(X)
@@ -885,10 +894,9 @@ class GaussianProcessSearch:
         os.remove(self._checkpoint_path)
 
     @classmethod
-    def from_checkpoint(cls, logmodel, checkpoint, Xnew=None):
+    def from_checkpoint(cls, logmodel, checkpoint):
         """
-        Loads the grid search from a checkpoint. May manually assign points
-        to sample.
+        Loads the grid search from a checkpoint.
 
         Parameters
         ----------
@@ -897,8 +905,6 @@ class GaussianProcessSearch:
             checkpoint.
         checkpoint : dict
             Checkpoint returned from `self.current_state`.
-        Xnew : numpy.ndarray, optional
-            Optional points to be manually sampled.
 
         Returns
         -------
@@ -916,7 +922,4 @@ class GaussianProcessSearch:
         generator0 = grid.generator
         grid._refit_gp()
         grid.generator = generator0
-        # If any new points sample those
-        if Xnew is not None:
-            grid.run_points(Xnew)
         return grid
