@@ -103,8 +103,6 @@ class GaussianProcessSearch:
         Keyword arguments passed into `dynesty.NestedSampler`. Includes
         multiprocessing pool.
     """
-
-
     def __init__(self, name, params, logmodel, bounds, nthreads=1, kappa=5.,
                  gp=None, hyper_grid=None, stopping_tolerance=None,
                  patience=None, random_state=None, verbose=True,
@@ -245,14 +243,14 @@ class GaussianProcessSearch:
             raise TypeError("`bounds` must be a dict.")
         # Check each parameter has a boundary
         for par in self.params:
-            if not par in bounds.keys():
+            if par not in bounds.keys():
                 raise ValueError("Parameter '{}' is missing a boundary."
                                  .format(par))
         # Check each entry is a len-2 tuple
         for par, bound in bounds.items():
             if not isinstance(bound, (list, tuple)) or len(bounds) != 2:
                 raise TypeError("Parameter's '{}' boundary '{}' must be a "
-                                 "len-2 tuple.".format(par, bound))
+                                "len-2 tuple.".format(par, bound))
             # Ensure correct ordering
             if bound[0] > bound[1]:
                 bounds.update({par: bound[::-1]})
@@ -337,9 +335,10 @@ class GaussianProcessSearch:
         """
         # Set up the Gaussian process, pipeline and grid search
         if gp is None:
-            gp = GaussianProcessRegressor(kernels.Matern(nu=2.5),
-                    alpha=1e-6, normalize_y=True, n_restarts_optimizer=5,
-                    random_state=self.generator)
+            kernel = kernels.Matern(nu=2.5)
+            gp = GaussianProcessRegressor(kernel, alpha=1e-6, normalize_y=True,
+                                          n_restarts_optimizer=5,
+                                          random_state=self.generator)
         elif not isinstance(gp, GaussianProcessRegressor):
             raise TypeError("`gp` must be of {} type."
                             .format(GaussianProcessRegressor))
@@ -363,11 +362,11 @@ class GaussianProcessSearch:
         """
         if stopping_tolerance is None and patience is None:
             return
-        err = ("`stopping_tolerance` and `patience` must either be both `None` "
-               "or both assigned values")
-        if stopping_tolerance is None and  patience is not None:
+        err = ("`stopping_tolerance` and `patience` must either be both `None`"
+               " or both assigned values")
+        if stopping_tolerance is None and patience is not None:
             raise ValueError(err)
-        elif stopping_tolerance is not None and  patience is None:
+        elif stopping_tolerance is not None and patience is None:
             raise ValueError(err)
         if not isinstance(stopping_tolerance, float):
             raise TypeError("`stopping_tolerance` must be of float type.")
@@ -436,11 +435,9 @@ class GaussianProcessSearch:
             newly sampled points are only saved upon termination. However a
             checkpoint is always stored.
         kwargs : dict
-            Keyword arguments passed into `self.logmodel` that are not the sampled
-            positions.
+            Keyword arguments passed into `self.logmodel` that are not the
+            sampled positions.
         """
-#        if kwargs is None:
-#            kwargs = {}
         # Unpack X into a list of dicts
         points = [{attr: X[i, j] for j, attr in enumerate(self.params)}
                   for i in range(X.shape[0])]
@@ -451,9 +448,11 @@ class GaussianProcessSearch:
 
         with joblib.Parallel(n_jobs=self.nthreads) as par:
             if kwargs is None:
-                res = par(joblib.delayed(self.logmodel)(point) for point in points)
+                res = par(joblib.delayed(self.logmodel)(point)
+                          for point in points)
             else:
-                res = par(joblib.delayed(self.logmodel)(point, **kwargs) for point in points)
+                res = par(joblib.delayed(self.logmodel)(point, **kwargs)
+                          for point in points)
         # Figure out whether we have any blobs
         if isinstance(res[0], tuple):
             targets = [out[0] for out in res]
@@ -770,11 +769,11 @@ class GaussianProcessSearch:
         """
         if self.stopping_tolerance is None:
             return False
-        entropies = self.batch_entropies
-        entropies[:, 1] = numpy.abs(entropies[:, 1])
-        if entropies.shape[0] < self.patience:
+        entrs = self.batch_entropies
+        entrs[:, 1] = numpy.abs(entropies[:, 1])
+        if entrs.shape[0] < self.patience:
             return False
-        elif numpy.all(entropies[-self.patience:, 1] < self.stopping_tolerance):
+        elif numpy.all(entrs[-self.patience:, 1] < self.stopping_tolerance):
             return True
         return False
 
@@ -853,7 +852,7 @@ class GaussianProcessSearch:
         checkpoint = self.current_state
         if self.verbose:
             print("Checkpoint saved at {}".format(self._checkpoint_path),
-                   flush=True)
+                  flush=True)
         joblib.dump(checkpoint, self._checkpoint_path)
 
     def save_grid(self):
