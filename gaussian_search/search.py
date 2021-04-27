@@ -339,8 +339,7 @@ class GaussianProcessSearch:
             kernel = kernels.Matern(nu=2.5)
             gp = GaussianProcessRegressor(kernel, alpha=1e-6, normalize_y=True,
                                           n_restarts_optimizer=5,
-                                          random_state=self.generator,
-                                          copy_X_train=False)
+                                          random_state=self.generator)
         elif not isinstance(gp, GaussianProcessRegressor):
             raise TypeError("`gp` must be of {} type."
                             .format(GaussianProcessRegressor))
@@ -447,7 +446,7 @@ class GaussianProcessSearch:
                   for i in range(X.shape[0])]
         # Process the points in parallel
         if self.verbose:
-            print("{}: evaluating {} samples.".format(datetime.now(),
+            print("{}: Evaluating {} samples.".format(datetime.now(),
                                                       len(points)))
             sys.stdout.flush()
 
@@ -499,7 +498,7 @@ class GaussianProcessSearch:
         and `self._y`
         """
         if self.verbose:
-            print("{}: refitting the Gaussian process.".format(datetime.now()))
+            print("{}: Refitting the Gaussian process.".format(datetime.now()))
             sys.stdout.flush()
         self._previous_gp = deepcopy(self._surrogate_model)
         # Silence convergence warning of the GaussianRegressor's optimiser
@@ -552,8 +551,13 @@ class GaussianProcessSearch:
                 self.run_points(X, kwargs=kwargs, to_refit=False)
             else:
                 self.run_points(X, kwargs=kwargs, to_refit=True)
+            if self.verbose:
+                print("{}: Completed {}/{} uniform iterations."
+                      .format(datetime.now(), i+1, Ninit))
+                sys.stdout.flush()
+
         # Batches sampled from the acquisition function
-        for __ in range(Nmcmc):
+        for i in range(Nmcmc):
             X = self._acquisition_samples()
 
             if batch_size > X.shape[0]:
@@ -569,12 +573,18 @@ class GaussianProcessSearch:
                 self._batch_entropies.append([self._batch_iter, entropy])
             if self._to_terminate():
                 if self.verbose:
-                    print("Terminating, entropy condition met.")
+                    print("{}: Terminating, entropy condition met."
+                          .format(datetime.now()))
                     sys.stdout.flush()
                 break
+            if self.verbose:
+                print("{}: Completed {}/{} MCMC iterations."
+                      .format(datetime.now(), i+1, Ninit))
+                sys.stdout.flush()
 
         if self.verbose and not self._to_terminate():
-            print("Terminating, number of requested iterations reached.")
+            print("{}: Terminating, number of requested iterations reached."
+                  .format(datetime.now()))
             sys.stdout.flush()
         # Clean up the memory mapping
         if memmap_path is not None:
@@ -680,7 +690,7 @@ class GaussianProcessSearch:
             Log evidence as returned by the nested sampler.
         """
         if self.verbose:
-            print("{}: sampling the surrogate model.".format(datetime.now()))
+            print("{}: Sampling the surrogate model.".format(datetime.now()))
             sys.stdout.flush()
         samples, target, logz = self._samples(kappa=0, return_full=True)
         X = numpy.hstack([samples, target.reshape(-1, 1)])
@@ -698,7 +708,7 @@ class GaussianProcessSearch:
             Samples drawn from the acquisition function.
         """
         if self.verbose:
-            print("{}: sampling the acquisition function."
+            print("{}: Sampling the acquisition function."
                   .format(datetime.now()))
             sys.stdout.flush()
         return self._samples(kappa=self.kappa)
@@ -852,6 +862,7 @@ class GaussianProcessSearch:
         self._state.update({'X': self._X,
                             'y': self._y,
                             'blobs': self.blobs,
+                            'surrogate_model': self._surrogate_model,
                             'random_state': self.generator})
         return self._state
 
@@ -863,7 +874,8 @@ class GaussianProcessSearch:
         """
         checkpoint = self.current_state
         if self.verbose:
-            print("Checkpoint saved at {}".format(self._checkpoint_path))
+            print("{}: Checkpoint saved at {}".format(datetime.now(),
+                                                      self._checkpoint_path))
             sys.stdout.flush()
         joblib.dump(checkpoint, self._checkpoint_path)
 
@@ -892,7 +904,7 @@ class GaussianProcessSearch:
         checkpoint = self.current_state
         joblib.dump(checkpoint, fpath + 'checkpoint.z')
         if self.verbose:
-            print("Output saved at {}.".format(fpath))
+            print("{}: Output saved at {}.".format(datetime.now(), fpath))
             sys.stdout.flush()
         # Remove the temporary checkpoint
         os.remove(self._checkpoint_path)
@@ -918,9 +930,13 @@ class GaussianProcessSearch:
         X = checkpoint.pop('X', None)
         y = checkpoint.pop('y', None)
         blobs = checkpoint.pop('blobs', None)
+        surrogate_model = checkpoint.pop('surrogate_model', None)
         grid = cls(logmodel=logmodel, **checkpoint)
         grid._X = X
         grid._y = y
         grid._blobs = blobs
-        grid._refit_gp()
+        if surrogate_model is None:
+            grid._refit_gp()
+        else:
+            grid._surrogate_model = surrogate_model
         return grid
