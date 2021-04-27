@@ -507,8 +507,8 @@ class GaussianProcessSearch:
             self._surrogate_model.fit(self._X, self._y)
 
     def run_batches(self, Ninit=0, Nmcmc=0, batch_size=5, to_save=True,
-                    kwargs=None):
-        """
+                    beta=1, kwargs=None):
+        r"""
         Samples `Ninit` and `Nmcmc` in batches of size `batch_size`. If any
         `kwargs` are passed, these will be memory-mapped to the disk for
         faster parallel computation.
@@ -526,6 +526,9 @@ class GaussianProcessSearch:
         to_save : bool
             Whether to save the points upon evaluation. By default `True` and
             newly sampled points are only saved upon termination.
+        beta : float, optional
+            Parallel tempering parameter :math:`L^{\beta}`, where :math:`L`
+            is the target function.
         kwargs : dict
             Keyword arguments passed into `self.logmodel` that are not the
             sampled positions.
@@ -558,7 +561,7 @@ class GaussianProcessSearch:
 
         # Batches sampled from the acquisition function
         for i in range(Nmcmc):
-            X = self._acquisition_samples()
+            X = self._acquisition_samples(beta=beta)
 
             if batch_size > X.shape[0]:
                 raise ValueError("Cannot ask for larger batch size ({}) than "
@@ -579,7 +582,7 @@ class GaussianProcessSearch:
                 break
             if self.verbose:
                 print("{}: Completed {}/{} MCMC iterations."
-                      .format(datetime.now(), i+1, Ninit))
+                      .format(datetime.now(), i+1, Nmcmc))
                 sys.stdout.flush()
 
         if self.verbose and not self._to_terminate():
@@ -593,7 +596,7 @@ class GaussianProcessSearch:
         if to_save:
             self.save_grid()
 
-    def surrogate_predict(self, X, kappa=0):
+    def surrogate_predict(self, X, kappa=0, beta=1):
         r"""
         Evaluates the surrogate model at positions `X`, such that
 
@@ -612,6 +615,9 @@ class GaussianProcessSearch:
         kappa : int, optional
             Parameter controlling the contribution of the Gaussian process's
             standar deviation. By default 0.
+        beta : float, optional
+            Parallel tempering parameter :math:`L^{\beta}`, where :math:`L`
+            is the target function.
 
         Returns
         -------
@@ -638,7 +644,8 @@ class GaussianProcessSearch:
         # Again if 1D input return just a float
         if ndim == 1:
             ypred = ypred[0]
-        return ypred
+        # Assuming that ypred is logarithm of the target function
+        return beta * ypred
 
     def relative_entropy(self, samples):
         """
@@ -697,10 +704,16 @@ class GaussianProcessSearch:
         X = numpy.core.records.fromarrays(X.T, names=self.params + ['target'])
         return X, logz
 
-    def _acquisition_samples(self):
-        """
+    def _acquisition_samples(self, beta=1):
+        r"""
         Draws samples from the acquisition function, calls the nested sampler
         (Dynesty).
+
+        Parameters
+        ----------
+        beta : float, optional
+            Parallel tempering parameter :math:`L^{\beta}`, where :math:`L`
+            is the target function.
 
         Returns
         -------
@@ -711,10 +724,10 @@ class GaussianProcessSearch:
             print("{}: Sampling the acquisition function."
                   .format(datetime.now()))
             sys.stdout.flush()
-        return self._samples(kappa=self.kappa)
+        return self._samples(kappa=self.kappa, beta=beta)
 
-    def _samples(self, kappa, return_full=False, print_progress=False):
-        """
+    def _samples(self, kappa, beta=1, return_full=False, print_progress=False):
+        r"""
         Draws samples from the surrogate model (optionally the acquisition
         function). Calls `dynesty.NestedSampler`. Runs on a single thread even
         if `self.nthreads > 1`.
@@ -724,6 +737,9 @@ class GaussianProcessSearch:
         kappa : int
             Acquisition function parameter. See class documentation for more
             information.
+        beta : float, optional
+            Parallel tempering parameter :math:`L^{\beta}`, where :math:`L`
+            is the target function. By default 1.
         return_full : bool, optional
             Whether to also return the sampled log-target values and the
             target evidence.
@@ -743,7 +759,8 @@ class GaussianProcessSearch:
         """
         sampler = NestedSampler(
                 self.surrogate_predict, self._prior_transform,
-                ndim=len(self.params), logl_kwargs={'kappa': kappa},
+                ndim=len(self.params),
+                logl_kwargs={'kappa': kappa, 'beta': beta},
                 rstate=self.generator, **self._sampler_kwargs)
         sampler.run_nested(print_progress=print_progress)
 
